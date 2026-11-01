@@ -1,0 +1,6 @@
+# Keep Windows line endings for the files Windows runs
+*.ps1  text eol=crlf
+*.cmd  text eol=crlf
+*.bat  text eol=crlf
+*.md   text
+*.txt  text

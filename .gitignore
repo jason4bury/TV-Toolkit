@@ -1,0 +1,12 @@
+# TV Toolkit creates this on first run: settings, library scan, cache and logs.
+# It holds your own paths and library details, so keep it out of the repository.
+Data/
+
+# Release zips and backups
+*.zip
+*.bak*
+
+# Windows clutter
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
