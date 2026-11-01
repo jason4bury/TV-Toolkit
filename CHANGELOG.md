@@ -3,6 +3,20 @@
 All notable changes to TV Toolkit are listed here, newest first.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.9.1]
+
+### Added
+- `Build-Exe.ps1` and `Build TV Toolkit exe.cmd` build `TV Toolkit.exe` with PS2EXE. Before building they check:
+  - Windows, Windows PowerShell 5.1 and .NET Framework 4.7.2 or later
+  - that Group Policy or Intune isn't enforcing a blocking execution policy
+  - the app script (syntax) and icon
+  - the PS2EXE module, offering to install it
+  - that the exe isn't running
+- TV Toolkit icon (`App\TV-Toolkit.ico`) on the window, taskbar and exe.
+
+### Changed
+- TV Toolkit works out where its `Data` folder is whether it runs as the script or as the exe.
+
 ## [1.9.0]
 
 ### Added

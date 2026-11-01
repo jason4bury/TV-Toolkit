@@ -3,7 +3,7 @@
     Desktop companion for the TV programmes on your NAS.
     PowerShell + WPF. Run with "Start TV Toolkit.cmd".
 #>
-$AppVersion = '1.9.0'
+$AppVersion = '1.9.1'
 
 $CoreScript = {
 # ===================== TV Toolkit core (shared by UI and background workers) =====================
@@ -871,9 +871,19 @@ function New-ShowListHtml($lib, $MatchMap, $index, [switch]$Episodes) {
 
 # ===================== UI =====================
 $ErrorActionPreference = 'Continue'
-$AppDir = $PSScriptRoot
-if (-not $AppDir) { $AppDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
-$RootDir = Split-Path -Parent $AppDir
+# Works both as App\TV-Toolkit.ps1 (run by 'Start TV Toolkit.cmd') and as 'TV Toolkit.exe' built by Build-Exe.ps1.
+# The exe sits in the main TV Toolkit folder, so Data is next to it; the script sits in App, so Data is one level up.
+$ExePath = ''
+try { $ExePath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName } catch {}
+$IsExe = [bool]($ExePath -and ([IO.Path]::GetFileNameWithoutExtension($ExePath) -notmatch '^(powershell|pwsh|powershell_ise)$'))
+if ($IsExe) {
+    $RootDir = Split-Path -Parent $ExePath
+    $AppDir = Join-Path $RootDir 'App'
+} else {
+    $AppDir = $PSScriptRoot
+    if (-not $AppDir) { $AppDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
+    $RootDir = Split-Path -Parent $AppDir
+}
 $DataDir = Join-Path $RootDir 'Data'
 $StartLog = Join-Path $DataDir 'Logs\startup.log'
 $StartClock = [Diagnostics.Stopwatch]::StartNew()
@@ -2311,6 +2321,16 @@ function New-Window([string]$xamlText) {
 $main = New-Window $MainXaml
 Write-StartLog 'Main window built'
 $Win = $main.Window
+# Window and taskbar icon: App\TV-Toolkit.ico if it's there, otherwise the icon built into the exe
+try {
+    $ico = Join-Path $AppDir 'TV-Toolkit.ico'
+    if (Test-Path -LiteralPath $ico) { $Win.Icon = [Windows.Media.Imaging.BitmapFrame]::Create([Uri]::new($ico)) }
+    elseif ($IsExe) {
+        Add-Type -AssemblyName System.Drawing
+        $hi = [Drawing.Icon]::ExtractAssociatedIcon($ExePath)
+        $Win.Icon = [Windows.Interop.Imaging]::CreateBitmapSourceFromHIcon($hi.Handle, [Windows.Int32Rect]::Empty, [Windows.Media.Imaging.BitmapSizeOptions]::FromEmptyOptions())
+    }
+} catch {}
 $ui = $main.UI
 
 # ---------- helpers ----------
@@ -4093,6 +4113,9 @@ $ui.txtAboutVersion.Text = "Version $AppVersion  $DOT  PowerShell $($PSVersionTa
 $ui.txtHeaderVersion.Text = "v$AppVersion"
 $Win.Title = "TV Toolkit v$AppVersion"
 $ui.txtAboutNew.Text = @"
+1.9.1
+$DOT  TV Toolkit can be built as a Windows program (TV Toolkit.exe) with Build-Exe.ps1, and has its own TV icon on the window and taskbar.
+
 1.9.0
 $DOT  'Since you last opened it' card: when you open TV Toolkit it lists episodes that arrived, shows that came back on TV and episodes that aired that you don't have, with buttons to the New, Missing and Calendar pages.
 $DOT  Season complete: a green tick on a poster when you have every aired episode of the show's latest season, a tick on complete season chips, and a Latest season column in the list view.

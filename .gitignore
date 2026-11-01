@@ -2,7 +2,8 @@
 # It holds your own paths and library details, so keep it out of the repository.
 Data/
 
-# Release zips and backups
+# Built exe (attach it to a GitHub release instead), release zips and backups
+*.exe
 *.zip
 *.bak*
 

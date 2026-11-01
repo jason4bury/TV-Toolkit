@@ -4,3 +4,5 @@
 *.bat  text eol=crlf
 *.md   text
 *.txt  text
+*.ico  binary
+*.exe  binary

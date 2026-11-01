@@ -6,7 +6,7 @@ TV Toolkit reads your TV folders, matches each show with [TVmaze](https://www.tv
 
 It's written in Windows PowerShell and WPF, so there's nothing to install: unzip it and run it.
 
-> Current version: **1.9.0** - see [CHANGELOG.md](CHANGELOG.md)
+> Current version: **1.9.1** - see [CHANGELOG.md](CHANGELOG.md)
 
 ---
 
@@ -68,6 +68,30 @@ T:\Show Name\S30\Show Name - 30x01 - Episode Title.mkv
 - Shows marked **CHECK MATCH** were a best guess: open them and press **Confirm match**, or **Fix match…** to choose the right one
 - Extras folders (backdrops, extras, trailers, featurettes…) are ignored
 
+## Building an exe (optional)
+
+You can turn TV Toolkit into a normal Windows program, `TV Toolkit.exe`, with the TV icon:
+
+1. Double-click **`Build TV Toolkit exe.cmd`**. You can also run `.\Build-Exe.ps1` from Windows PowerShell.
+2. It checks everything it needs first:
+   - Windows and Windows PowerShell 5.1
+   - .NET Framework 4.7.2 or later
+   - the app script and icon
+   - that Group Policy or Intune isn't enforcing an execution policy that blocks scripts
+   - that the exe isn't already running
+3. If the [PS2EXE](https://github.com/MScholtes/PS2EXE) module is missing, it offers to install it for your user account from the PowerShell Gallery. Use `-Install` to skip the question.
+4. It writes `TV Toolkit.exe` next to `Start TV Toolkit.cmd`. Both use the same `Data` folder, so your settings and cache carry over.
+
+You don't need to change your execution policy. The `.cmd` file runs the build with `-ExecutionPolicy Bypass` for that run only, and the script unblocks files downloaded from GitHub.
+
+| Option | What it does |
+| --- | --- |
+| `-CheckOnly` | Check the requirements without building |
+| `-Install` | Install PS2EXE without asking |
+| `-Run` | Start the exe when the build finishes |
+
+Some antivirus programs are wary of new PS2EXE-built programs. If yours blocks the exe, allow it or keep using `Start TV Toolkit.cmd`.
+
 ## Keyboard shortcuts
 
 | Key | What it does |
@@ -105,7 +129,10 @@ The `Data` folder is created on first run and is **not** part of this repository
 ```
 Start TV Toolkit.cmd    Double-click to start
 App\TV-Toolkit.ps1      The application (single file: UI, logic and theme)
+App\TV-Toolkit.ico      The TV Toolkit icon (window, taskbar and exe)
 App\Launch.ps1          Small launcher that logs each start and shows an error if it can't start
+Build-Exe.ps1           Builds TV Toolkit.exe (optional)
+Build TV Toolkit exe.cmd  Double-click to run Build-Exe.ps1
 README.md               This file
 CHANGELOG.md            Version history
 LICENSE                 MIT licence
