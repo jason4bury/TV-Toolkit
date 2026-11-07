@@ -1,13 +1,33 @@
-# TV Toolkit creates this on first run: settings, library scan, cache and logs.
-# It holds your own paths and library details, so keep it out of the repository.
+# Settings, show matches, cache and logs live in %APPDATA%\TV Toolkit, outside the repo.
+# This catches the portable 'Data' folder that versions before 1.00 kept here, which holds
+# your TV folder paths and library details.
 Data/
 
-# Built exe (attach it to a GitHub release instead), release zips and backups
+# Builds live in ..\Builds\, outside the repo. Safety net in case one lands here.
+Builds/
 *.exe
-*.zip
+
+# Exports made from the app can list your library and file paths - keep them out
+TV Shows*.html
+Missing episodes*.csv
+TV Toolkit - coming up*.ics
+TV Toolkit settings*.zip
+TVToolkit-backup-*.zip
+
+# Logs, temp files and backups (Build-Exe.log, editor backups)
+*.log
+*.tmp
 *.bak*
+
+# Local config and secrets
+config.local.json
+.env
 
 # Windows clutter
 Thumbs.db
 desktop.ini
 $RECYCLE.BIN/
+
+# Editor
+.vscode/
+*.swp

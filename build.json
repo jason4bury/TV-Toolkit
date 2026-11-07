@@ -1,0 +1,15 @@
+{
+  "AppName": "TV Toolkit",
+  "EntryScript": "src\\TV-Toolkit.ps1",
+  "Icon": "assets\\TV-Toolkit.ico",
+  "Side": "Home",
+  "IncludeFiles": [],
+  "Description": "PowerShell/WPF tool for browsing, tracking and tidying the TV shows on your NAS",
+  "Ps2exe": {
+    "STA": true,
+    "NoConsole": true,
+    "NoOutput": true,
+    "NoError": true,
+    "NoConfigFile": true
+  }
+}

@@ -1,7 +1,8 @@
 @echo off
-rem TV Toolkit launcher - keeps everything inside this folder (portable)
+rem Starts TV Toolkit from the script. The execution-policy bypass applies to this run only;
+rem no Windows settings are changed. Settings and data are kept in %APPDATA%\TV Toolkit.
 cd /d "%~dp0"
-if not exist "%~dp0Data\Logs" mkdir "%~dp0Data\Logs"
-echo [%date% %time%] cmd started>> "%~dp0Data\Logs\launch.log"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "%~dp0App\Launch.ps1"
-if errorlevel 1 echo [%date% %time%] powershell exited with code %errorlevel%>> "%~dp0Data\Logs\launch.log"
+if not exist "%APPDATA%\TV Toolkit\Logs" mkdir "%APPDATA%\TV Toolkit\Logs"
+echo [%date% %time%] cmd started>> "%APPDATA%\TV Toolkit\Logs\launch.log"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "%~dp0src\Launch.ps1"
+if errorlevel 1 echo [%date% %time%] powershell exited with code %errorlevel%>> "%APPDATA%\TV Toolkit\Logs\launch.log"

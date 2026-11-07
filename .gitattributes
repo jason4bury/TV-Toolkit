@@ -1,8 +1,13 @@
-# Keep Windows line endings for the files Windows runs
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Windows scripts keep CRLF on checkout (batch files can misbehave with LF)
 *.ps1  text eol=crlf
+*.psd1 text eol=crlf
 *.cmd  text eol=crlf
 *.bat  text eol=crlf
-*.md   text
-*.txt  text
-*.ico  binary
-*.exe  binary
+
+# Binary assets
+*.ico binary
+*.png binary
+*.exe binary

@@ -1,211 +1,59 @@
 # Changelog
 
-All notable changes to TV Toolkit are listed here, newest first.
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/).
+All notable changes to TV Toolkit are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), with versions numbered
+`<major>.<minor>` and a two-digit minor (v1.00, v1.01 ... v1.10) to match the exe file names.
 
-## [1.9.1]
+## [Unreleased]
 
-### Added
-- `Build-Exe.ps1` and `Build TV Toolkit exe.cmd` build `TV Toolkit.exe` with PS2EXE. Before building they check:
-  - Windows, Windows PowerShell 5.1 and .NET Framework 4.7.2 or later
-  - that Group Policy or Intune isn't enforcing a blocking execution policy
-  - the app script (syntax) and icon
-  - the PS2EXE module, offering to install it
-  - that the exe isn't running
-- TV Toolkit icon (`App\TV-Toolkit.ico`) on the window, taskbar and exe.
+## [1.00] - 2026-11-07
+First release in the house style. Version numbers restart here; the history before this
+(1.0.0 to 1.9.1) is kept in [docs/HISTORY-before-1.00.md](docs/HISTORY-before-1.00.md).
 
 ### Changed
-- TV Toolkit works out where its `Data` folder is whether it runs as the script or as the exe.
-
-## [1.9.0]
-
-### Added
-- **"Since you last opened it" card**: when you open TV Toolkit it lists episodes that arrived, shows that came back on TV, and episodes that aired that you don't have. It has buttons to the New, Missing episodes and Calendar pages.
-- **Season complete**: a green tick on a poster when you have every aired episode of the show's latest season, a tick on complete season chips, and a *Latest season* column in the list view.
-- **Calendar export**: *Save to my calendar (.ics)* saves the next 3 months of your shows' episodes (UK times, channel, length) for Outlook, Google Calendar or your phone. Re-importing updates the same entries.
-- **Jump by letter**: on the Library page, type a letter to jump to the first show starting with it. Type it again for the next one, and press Enter to open.
-
-### Changed
-- Missing episodes checks itself the first time you open the page.
-- About page description brought up to date.
-- Calendar, Cast and poster images are always passed to the screen as images, guarding against the PowerShell display error fixed in 1.8.0.
-
-## [1.8.2]
-
-### Changed
-- Top bar shows new, shows, episodes, space used and free space as separate figures. Free space turns amber at 75% full and red at 90%. Click any figure to jump to its page.
-- Rescan is a quieter outlined button that shows when the library was last scanned.
-
-## [1.8.1]
-
-### Changed
-- Shows with nothing on disk say when they start or come back (for example *Back 25 Nov 2026*) instead of *Waiting for episodes*, when TVmaze knows the date. Ended shows say *Ended - nothing on disk*.
+- **Settings and data moved to `%APPDATA%\TV Toolkit\`.** They used to be in a portable
+  `Data` folder beside `App`. The first time v1.00 starts, it copies an existing `Data`
+  folder across (settings, show matches, the image cache, logs and backups), leaves a
+  "MOVED - read me.txt" note in the old folder and says where it came from, so you can
+  delete the old copy once you've checked it.
+- **New repo layout.** The script is now `src/TV-Toolkit.ps1` with its launcher
+  `src/Launch.ps1`, the icon is `assets/TV-Toolkit.ico` (plus `assets/TV-Toolkit.png` for
+  the README), and older history is in `docs/`. Builds go to the project's `Builds\`
+  folder, outside the repo.
+- **Exe name.** Builds are now named `TV Toolkit v<version>.exe`, e.g. `TV Toolkit v1.00.exe`,
+  using the standard build script and `build.json`. `Build-Exe.cmd` does the same build
+  until the shared script is ready, and replaces `Build-Exe.ps1` and `Build TV Toolkit exe.cmd`.
+- **No TV folder is assumed.** New installs start with an empty TV folder list (and no
+  holding folder) and open Settings, instead of filling in `T:\`. Existing settings are kept.
+- **About tab** shows the version as "v1.00", the copyright, MIT licence and a link to the
+  GitHub repo. Its "What's new" list now matches this changelog instead of repeating the
+  whole history, and the Data section says where everything is kept.
+- The main window's minimum height is 640 instead of 700, so it fits a 1080p screen at
+  150% scaling when it isn't maximised.
+- Web requests identify themselves to TVmaze as TV Toolkit with a link to the repo, and
+  use TLS 1.2 only (TLS 1.0 and 1.1 are no longer offered).
 
 ### Fixed
-- Library list view: clicking a column heading now sorts, and clicking again reverses the order.
+- **Moving a duplicate to the holding folder could move the copy you were keeping.** Files
+  were matched by name only, so moving `Show - 1x01 - Title.avi` also moved
+  `Show - 1x01 - Title.mkv`. Only the selected file moves now; its subtitles and artwork
+  stay with the copy that's left. The same applies to Problem files and Rename.
+- **Rename could pick up a different episode's files** whose names started the same way
+  (for example a multi-episode `1x01-02` file when renaming `1x01`). Only subtitles, `.nfo`
+  files and Kodi-style artwork (`-thumb`, `-poster`, `-fanart` and so on) go with an episode
+  now, and every new name is checked before any file is touched.
+- **Rescan with the NAS switched off emptied the library.** If a TV folder can't be reached,
+  the last scan is kept and you're told which folder couldn't be reached.
+- Half-downloaded posters and photos are no longer left behind as `.part` files when a
+  download fails.
+- The Utilities page no longer says exported settings include API keys (TVmaze needs none).
 
-## [1.8.0]
-
-### Added
-- **Drive space** on Stats: free space for each TV drive, a used/free bar (amber over 75%, red over 90%), and roughly when it'll be full at the rate episodes have been arriving.
-- **Problem files** page: tiny or unreadable episodes, unfinished downloads, sample files, episodes not in a season folder, junk files, subtitles or `.nfo` files with no episode, and empty folders. You can move files to the holding folder, move loose episodes into the right season folder (using an existing *Season 2* style folder if there is one), or remove empty folders.
-- **Backdrops**: the show's wide background picture fades in behind the top of the show panel.
-- **Episode pictures** in the episode list and on the New page.
-- **Library list view**: switch between Posters and a sortable List. Your choice is remembered.
-
-### Changed
-- The show panel is wider, so episode titles still fit next to the pictures.
-
-### Fixed
-- A crash when opening a show, caused by a Windows PowerShell 5.1 engine quirk.
-- If something goes wrong on a page, it's now written to `Data\Logs\crash.log` with full details and the app keeps running instead of closing.
-
-## [1.7.1]
-
-### Removed
-- Leftover code from the watched and Medusa features, and unused settings. Old settings (Medusa address and key, TheTVDB keys) are cleared from `settings.json` the next time settings are saved.
-
-## [1.7.0]
-
-### Removed
-- All Medusa features: the Medusa page and settings, *Add to Medusa*, search and pick-a-copy buttons. TV Toolkit now just looks after your library.
-
-## [1.6.2]
-
-### Changed
-- About page: What's new moved into its own panel on the right.
-
-## [1.6.1]
-
-### Changed
-- Space used is shown as a whole number of GB in the header, the Stats tile and Biggest shows.
-
-## [1.6.0]
-
-### Removed
-- Watched tracking: the Next up page, watched buttons, ticks, progress bars and watched stats. *New* now simply means episodes that arrived recently.
-
-### Changed
-- Stats bar charts are shorter, giving names more room.
-
-## [1.5.1]
-
-### Added
-- Picture quality and length are read from inside the video files, using Windows' own video details with ffprobe as a fallback. This works without `1080p` in the file names, and new or changed files are read in the background.
-- Quality column in episode lists.
-- *Re-read video details* in Utilities.
-
-### Changed
-- Duplicates & quality uses the real resolution, and Stats' viewing time uses real file lengths.
-
-## [1.5.0]
-
-### Added
-- **Stats** page: totals and charts of episodes added per month, channels, genres, biggest shows, most episodes and picture quality. Hover over a bar for the exact figure.
-- Credits section on the About page.
-
-## [1.4.3]
-
-### Changed
-- Redesigned search box with an icon, match count, clear button and Ctrl+F hint.
-- Search also matches channels, genres, status and year. Esc clears it, and Enter opens the show when there's only one match.
-
-## [1.4.2]
-
-### Added
-- Cast members show their biography from TVmaze (Show more / Show less) and any other names they're known by.
-
-## [1.4.1]
-
-### Removed
-- The Coming up page, because the Calendar covers it. The *NEW TUE* style badges on the poster wall still show when a new episode airs this week.
-
-## [1.4.0]
-
-### Added
-- **Calendar** page: the next 7 days as columns with every episode airing from your shows, plus a *Missed in the last 7 days* strip. Each episode shows its UK air time, channel and running time, and is tagged ON DISK, TODAY, UPCOMING or MISSING.
-- Previous / This / Next week buttons, and *Hide episodes already on disk*.
-- Air times are saved with each episode and shown in your local time.
-
-## [1.3.0]
-
-### Added
-- **Cast** page: everyone in your shows as a wall of faces, with search, filters and sorting.
-- Person details: photo, birthday and age, country, which of your shows they're in, and the rest of their TV work.
-- *Back to show* returns to the show you came from.
-
-## [1.2.4]
-
-### Fixed
-- Cast photos are framed on the face (cropped from the top) instead of the middle.
-
-## [1.2.3]
-
-### Fixed
-- Cast photos now show. They were downloading but not being displayed.
-
-### Added
-- `Start TV Toolkit.cmd` logs each launch to `Data\Logs\launch.log`, and shows an error box if TV Toolkit can't start.
-
-## [1.2.2]
-
-### Added
-- Splash screen while starting.
-- Only one copy runs at a time. Opening it again brings the existing window to the front.
-- Each start is recorded in `Data\Logs\startup.log`.
-
-### Fixed
-- The window comes to the front when it opens instead of sometimes hiding behind other windows.
-
-## [1.2.1]
-
-### Fixed
-- Cast photos were downloading but only initials were showing.
-
-## [1.2.0]
-
-### Added
-- **New** page: every episode that arrived recently, newest first, with *Not new* to hide one. The tab shows how many are waiting.
-- Green *N NEW* badge on the poster wall, NEW tags in episode lists and new counts on season chips.
-- Setting for how many days an episode counts as new (default 14), based on when the file arrived on the drive.
-
-## [1.1.2]
-
-### Added
-- Version number in the header and window title.
-
-## [1.1.1]
-
-### Added
-- *Confirm match* button for best-guess matches.
-- *Waiting for episodes* library filter.
-
-### Changed
-- Extras folders (backdrops, extras, trailers, featurettes…) and theme music are ignored when scanning.
-- *Special 13* style files in S00/Specials are read as specials.
-
-## [1.1.0]
-
-### Changed
-- Show info, posters, cast and episode lists come from **TVmaze** (free, no API key) instead of TheTVDB, which no longer accepts legacy keys.
-- Logging moved to `Data\Logs\tvinfo.log`.
-
-## [1.0.1]
-
-### Fixed
-- Show-info problems are logged, and you're told when matching fails instead of it failing silently.
-
-## [1.0.0]
-
-First release.
-
-### Added
-- Poster wall for every show on your TV drive, with filters and sorting.
-- Show panel with info, cast photos, season chips and an episode list showing what's on disk, missing or upcoming.
-- Missing episodes check.
-- Filename checker for `Show - 1x01 - Title`, with preview, sidecar files renamed too, and undo.
-- Duplicates and quality by show, with a holding folder instead of deleting.
-- Backups, restore, moving settings between PCs, and a printable show list.
-- Watched tracking with a Next up list (removed in 1.6.0).
-- Medusa integration: add shows, search for missing episodes, pick a copy (removed in 1.7.0).
-
+### Internal
+- PSScriptAnalyzer clean-up: functions with unapproved verbs renamed (`Refresh-Library` is
+  now `Update-LibraryView`, `Fill-Episodes` is `Update-EpisodeList`, `Fix-Match` is
+  `Repair-ShowMatch`, `Load-Settings` is `Import-Settings` and so on), event handlers no
+  longer use the automatic `$sender` variable, and empty `catch` blocks write the error to
+  the verbose stream. Added `PSScriptAnalyzerSettings.psd1`.
+- Leftover TheTVDB sign-in code removed. App name, version and copyright are set once at the
+  top of the script, with comment-based help.
+- Closing the window asks any background downloads or checks to stop.

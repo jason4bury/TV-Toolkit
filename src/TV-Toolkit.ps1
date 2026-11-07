@@ -1,9 +1,27 @@
 ﻿<#
-    TV Toolkit
-    Desktop companion for the TV programmes on your NAS.
-    PowerShell + WPF. Run with "Start TV Toolkit.cmd".
+.SYNOPSIS
+    TV Toolkit - browse, track and tidy the TV programmes on your NAS or media drive.
+
+.DESCRIPTION
+    A Windows PowerShell 5.1 + WPF desktop app. It scans your TV folders, matches each
+    show with TVmaze (free, no API key) and shows a poster wall with show info, cast,
+    episode pictures and air dates. It finds new, missing and badly named episodes,
+    duplicates and problem files, and never renames, moves or deletes anything without
+    asking first.
+
+    Start it with "Start TV Toolkit.cmd", or build "TV Toolkit v<version>.exe" with
+    Build-Exe.cmd (see README.md).
+
+.NOTES
+    Version:   see $AppVersion below (matches the newest CHANGELOG.md entry)
+    Author:    Jason Rhodes
+    Licence:   MIT (see LICENSE)
+    Settings:  %APPDATA%\TV Toolkit\ (settings, show matches, cache, logs, backups)
+    Show data: TVmaze (https://www.tvmaze.com), CC BY-SA 4.0
 #>
-$AppVersion = '1.9.1'
+$AppName    = 'TV Toolkit'
+$AppVersion = '1.00'
+$Copyright  = 'Copyright (c) 2026 Jason Rhodes'
 
 $CoreScript = {
 # ===================== TV Toolkit core (shared by UI and background workers) =====================
@@ -13,9 +31,26 @@ $script:VideoExt = @('.mkv','.mp4','.avi','.m4v','.ts','.wmv','.mov','.mpg','.mp
 $script:SkipDirs = @('#recycle','@eadir','$recycle.bin','system volume information','.trash','.ds_store','#snapshot','@recycle')
 # Extras folders inside a show (theme music, trailers, featurettes...) - not episodes
 $script:ExtrasDirs = @('backdrops','extras','extra','featurettes','behind the scenes','deleted scenes','interviews','scenes','shorts','trailers','other','others','samples','sample','theme-music','themes')
+# Sent with every web request, so TVmaze can see who is calling
+$script:UserAgent = 'TV Toolkit (PowerShell; +https://github.com/jason4bury/TV-Toolkit)'
+# Kodi-style artwork that sits next to an episode as "<episode>-thumb.jpg" and so on
+$script:SidecarSuffixes = @('-thumb', '-poster', '-fanart', '-banner', '-landscape', '-clearart', '-clearlogo', '-discart', '-logo')
 
 function Initialize-Net {
-    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls11 } catch {}
+    # TLS 1.2 (TVmaze needs it; Windows PowerShell 5.1 may not turn it on by itself). TLS 1.0/1.1 are left off.
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { Write-Verbose $_.Exception.Message }
+}
+
+function Test-SidecarName([string]$FileName, [string]$Base) {
+    # True when $FileName belongs with the episode file whose name (without extension) is $Base:
+    # subtitles, .nfo, "-thumb.jpg" artwork and so on. Another video file with the same base name
+    # is a separate copy of the episode, not a sidecar, so it doesn't count.
+    if (-not $FileName.StartsWith($Base, [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    $rest = $FileName.Substring($Base.Length)
+    if (-not $rest) { return $false }
+    if ($rest.StartsWith('.')) { return ($script:VideoExt -notcontains [IO.Path]::GetExtension($FileName).ToLowerInvariant()) }
+    foreach ($s in $script:SidecarSuffixes) { if ($rest.StartsWith("$s.", [StringComparison]::OrdinalIgnoreCase)) { return $true } }
+    return $false
 }
 
 function Set-Progress([string]$Text, [double]$Pct = -1) {
@@ -53,7 +88,7 @@ function Write-TsvLines([string]$Path, [string[]]$Lines) {
     [IO.File]::WriteAllLines($tmp, $Lines, (New-Object Text.UTF8Encoding($false)))
     Move-Item -LiteralPath $tmp -Destination $Path -Force
 }
-function Clean-Field([string]$s) { if ($null -eq $s) { return '' } return ($s -replace "[`t`r`n]", ' ') }
+function ConvertTo-TsvField([string]$s) { if ($null -eq $s) { return '' } return ($s -replace "[`t`r`n]", ' ') }
 
 # ---------- text helpers ----------
 function Get-NormKey([string]$s) {
@@ -150,7 +185,7 @@ function Get-FilesSafe([string]$dir, [System.Collections.Generic.List[IO.FileInf
             if ($script:SkipDirs -contains $ln -or $script:ExtrasDirs -contains $ln -or $d.Name.StartsWith('.')) { continue }
             Get-FilesSafe $d.FullName $into
         }
-    } catch {}
+    } catch { Write-Verbose $_.Exception.Message }
 }
 function Get-NfoTvdbId([string]$showPath) {
     $nfo = Join-Path $showPath 'tvshow.nfo'
@@ -165,22 +200,28 @@ function Get-NfoTvdbId([string]$showPath) {
         if ($m.Success) { return [int]$m.Groups[1].Value }
         $m = [regex]::Match($txt, 'thetvdb\.com/\?tab=series&(?:amp;)?id=(\d+)')
         if ($m.Success) { return [int]$m.Groups[1].Value }
-    } catch {}
+    } catch { Write-Verbose $_.Exception.Message }
     return 0
 }
 
 function Invoke-LibraryScan([string[]]$Roots) {
-    # Writes Data\library.tsv : ShowFolder  Root  RelPath  Size  Ticks
-    # and Data\shows.tsv      : ShowFolder  Root  NfoTvdb  LocalPoster  DirTicks
+    # Writes library.tsv : ShowFolder  Root  RelPath  Size  Ticks
+    # and shows.tsv      : ShowFolder  Root  NfoTvdb  LocalPoster  DirTicks
     $files = New-Object System.Collections.Generic.List[string]
     $shows = New-Object System.Collections.Generic.List[string]
     $hold = ''
     if ($TVT.Settings.HoldFolder) { $hold = (Split-Path -Leaf $TVT.Settings.HoldFolder).ToLowerInvariant() }
     $list = New-Object System.Collections.Generic.List[object]
+    $unreachable = New-Object System.Collections.Generic.List[string]
     foreach ($root in $Roots) {
         if (-not $root) { continue }
-        if (-not (Test-Path -LiteralPath $root)) { Set-Progress "Can't reach $root"; continue }
-        try { foreach ($d in (New-Object IO.DirectoryInfo($root)).GetDirectories()) { $list.Add(@($root, $d)) } } catch {}
+        if (-not (Test-Path -LiteralPath $root)) { $unreachable.Add($root); continue }
+        try { foreach ($d in (New-Object IO.DirectoryInfo($root)).GetDirectories()) { $list.Add(@($root, $d)) } } catch { $unreachable.Add($root) }
+    }
+    # A NAS that's switched off or a drive that isn't mapped would otherwise look like an empty
+    # library and wipe the last scan. Keep the last scan instead and say what couldn't be reached.
+    if ($unreachable.Count -gt 0) {
+        throw ("Can't reach {0}. The last scan has been kept. Check the drive or NAS is on, or change your TV folders in Settings." -f ($unreachable -join ', '))
     }
     $i = 0
     foreach ($pair in $list) {
@@ -240,11 +281,11 @@ function Invoke-MediaProbe($items, [switch]$All) {
     $cache = Import-MediaInfo
     $todo = @($items | Where-Object { $All -or -not $cache.ContainsKey($_[0]) -or [int64]$cache[$_[0]][1] -ne [int64]$_[1] })
     $ff = Find-FFprobe
-    $shell = $null; try { $shell = New-Object -ComObject Shell.Application } catch {}
+    $shell = $null; try { $shell = New-Object -ComObject Shell.Application } catch { Write-Verbose $_.Exception.Message }
     $ok = 0; $viaFf = 0; $failed = 0; $i = 0
     $byDir = $todo | Group-Object { [IO.Path]::GetDirectoryName($_[0]) }
     foreach ($g in $byDir) {
-        $ns = $null; if ($shell) { try { $ns = $shell.Namespace($g.Name) } catch {} }
+        $ns = $null; if ($shell) { try { $ns = $shell.Namespace($g.Name) } catch { Write-Verbose $_.Exception.Message } }
         foreach ($it in $g.Group) {
             $i++
             Set-Progress ("Reading video details {0}/{1}" -f $i, $todo.Count) ($i / [math]::Max(1, $todo.Count) * 100)
@@ -258,7 +299,7 @@ function Invoke-MediaProbe($items, [switch]$All) {
                         $d = $fi.ExtendedProperty('System.Media.Duration'); if ($d) { $sec = [int]([double]$d / 10000000) }
                         if ($w -gt 0) { $src = 'windows' }
                     }
-                } catch {}
+                } catch { Write-Verbose $_.Exception.Message }
             }
             if ($w -le 0 -and $ff) {
                 try {
@@ -269,13 +310,13 @@ function Invoke-MediaProbe($items, [switch]$All) {
                         elseif ($line -match '^duration=([\d\.]+)') { $sec = [int][double]::Parse($Matches[1], [Globalization.CultureInfo]::InvariantCulture) }
                     }
                     if ($w -gt 0) { $src = 'ffprobe'; $viaFf++ }
-                } catch {}
+                } catch { Write-Verbose $_.Exception.Message }
             }
             if ($w -gt 0) { $ok++ } else { $failed++ }
             $cache[$it[0]] = @($it[0], "$($it[1])", "$($it[2])", "$w", "$h", "$sec", $src)
         }
     }
-    if ($shell) { try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell) } catch {} }
+    if ($shell) { try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell) } catch { Write-Verbose $_.Exception.Message } }
     if ($todo.Count -gt 0) { Write-TsvLines (Get-MediaCachePath) @($cache.Values | ForEach-Object { $_ -join "`t" }) }
     Set-Progress ("Video details: {0} read, {1} couldn't be read" -f $ok, $failed) 100
     return [pscustomobject]@{ Checked = $todo.Count; Ok = $ok; ViaFfprobe = $viaFf; Failed = $failed; FFprobe = [bool]$ff }
@@ -354,17 +395,17 @@ function Write-InfoLog([string]$Line) {
         if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
         if ((Test-Path -LiteralPath $p) -and (Get-Item -LiteralPath $p).Length -gt 2MB) { Move-Item -LiteralPath $p -Destination "$p.old" -Force }
         [IO.File]::AppendAllText($p, ("[{0}] {1}`r`n" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Line))
-    } catch {}
+    } catch { Write-Verbose $_.Exception.Message }
 }
 function Get-HttpErrorText($err) {
     $code = ''; $body = ''
-    try { $code = [int]$err.Exception.Response.StatusCode } catch {}
-    try { if ($err.ErrorDetails -and $err.ErrorDetails.Message) { $body = $err.ErrorDetails.Message } } catch {}
+    try { $code = [int]$err.Exception.Response.StatusCode } catch { Write-Verbose $_.Exception.Message }
+    try { if ($err.ErrorDetails -and $err.ErrorDetails.Message) { $body = $err.ErrorDetails.Message } } catch { Write-Verbose $_.Exception.Message }
     if (-not $body) {
         try {
             $st = $err.Exception.Response.GetResponseStream()
             if ($st) { $rd = New-Object IO.StreamReader($st); $body = $rd.ReadToEnd() }
-        } catch {}
+        } catch { Write-Verbose $_.Exception.Message }
     }
     $msg = $err.Exception.Message
     if ($body) { $b = ($body -replace '\s+', ' '); if ($b.Length -gt 300) { $b = $b.Substring(0, 300) + '...' }; $msg += " | $b" }
@@ -378,9 +419,9 @@ function Invoke-Maze([string]$PathAndQuery) {
         $wait = 520 - ((Get-Date) - $script:MazeLast).TotalMilliseconds
         if ($wait -gt 0) { Start-Sleep -Milliseconds ([int]$wait) }
         $script:MazeLast = Get-Date
-        try { return Invoke-RestMethod -Uri ("https://api.tvmaze.com/" + $PathAndQuery) -Headers @{ 'User-Agent' = 'TV Toolkit (PowerShell)' } -TimeoutSec 40 }
+        try { return Invoke-RestMethod -Uri ("https://api.tvmaze.com/" + $PathAndQuery) -UserAgent $script:UserAgent -TimeoutSec 40 }
         catch {
-            $code = 0; try { $code = [int]$_.Exception.Response.StatusCode } catch {}
+            $code = 0; try { $code = [int]$_.Exception.Response.StatusCode } catch { Write-Verbose $_.Exception.Message }
             if ($code -eq 404) { return $null }
             if ($code -eq 429 -and $try -lt 4) { Write-InfoLog "TVmaze busy (429) on $PathAndQuery - waiting"; Start-Sleep -Seconds (5 * $try); continue }
             Write-InfoLog ("GET {0} FAILED: {1}" -f $PathAndQuery, (Get-HttpErrorText $_))
@@ -399,7 +440,7 @@ function ConvertTo-StatusText([string]$s) {
 function ConvertFrom-MazeShow($sh) {
     $y = ''; if ("$($sh.premiered)" -match '^(\d{4})') { $y = $Matches[1] }
     $net = ''; if ($sh.network) { $net = "$($sh.network.name)" } elseif ($sh.webChannel) { $net = "$($sh.webChannel.name)" }
-    $tvdb = 0; try { if ($sh.externals.thetvdb) { $tvdb = [int]$sh.externals.thetvdb } } catch {}
+    $tvdb = 0; try { if ($sh.externals.thetvdb) { $tvdb = [int]$sh.externals.thetvdb } } catch { Write-Verbose $_.Exception.Message }
     $img = ''; if ($sh.image) { $img = "$($sh.image.medium)"; if (-not $img) { $img = "$($sh.image.original)" } }
     return [pscustomobject]@{ Id = [int]$sh.id; Tvdb = $tvdb; Name = "$($sh.name)"; Year = $y; Network = $net; Status = (ConvertTo-StatusText "$($sh.status)"); Overview = (ConvertFrom-Html "$($sh.summary)"); Image = $img }
 }
@@ -412,7 +453,7 @@ function Get-PersonWebExtras([string]$Url) {
         if ($wait -gt 0) { Start-Sleep -Milliseconds ([int]$wait) }
         $script:MazeLast = Get-Date
         Initialize-Net
-        $html = (Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 40 -Headers @{ 'User-Agent' = 'TV Toolkit (PowerShell)' }).Content
+        $html = (Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 40 -UserAgent $script:UserAgent).Content
         $m = [regex]::Match($html, '(?is)<section[^>]*id="general-information".*?<article[^>]*>(.*?)</article>')
         if ($m.Success) {
             $t = $m.Groups[1].Value -replace '(?i)</p>\s*<p[^>]*>', "`n`n" -replace '(?i)<br\s*/?>', "`n" -replace '<[^>]+>', ''
@@ -439,7 +480,7 @@ function Get-PersonFull([int]$Id, [string]$Name, [switch]$Force) {
     $path = Join-Path $TVT.DataDir "Cache\people-info\$Id.json"
     $cached = Read-JsonFile $path
     if ($cached -and -not $Force -and ($cached.PSObject.Properties.Name -contains 'Bio')) {
-        $age = 999; try { $age = ((Get-Date) - [datetime]::Parse($cached.Fetched)).TotalDays } catch {}
+        $age = 999; try { $age = ((Get-Date) - [datetime]::Parse($cached.Fetched)).TotalDays } catch { Write-Verbose $_.Exception.Message }
         if ($age -lt 30) { return $cached }
     }
     try {
@@ -502,7 +543,7 @@ function Get-MazeShowFull([int]$Id) {
         Genres = @($r.genres); Poster = $b.Image; Cast = @(); Episodes = @(); Fetched = (Get-Date).ToString('o') }
     $s.Cast = @(@($r._embedded.cast) | ForEach-Object { $_ } | Where-Object { $_ } | Select-Object -First 30 | ForEach-Object {
         $img = ''; if ($_.person.image) { $img = "$($_.person.image.medium)" } elseif ($_.character.image) { $img = "$($_.character.image.medium)" }
-        $perId = 0; try { $perId = [int]$_.person.id } catch {}
+        $perId = 0; try { $perId = [int]$_.person.id } catch { Write-Verbose $_.Exception.Message }
         [ordered]@{ Name = "$($_.person.name)"; Role = "$($_.character.name)"; Image = $img; PersonId = $perId } })
     $s.Episodes = @($r._embedded.episodes | Where-Object { $_ -and $null -ne $_.number -and $null -ne $_.season } | ForEach-Object {
         $st = ''; if ($_.airstamp -is [datetime]) { $st = $_.airstamp.ToUniversalTime().ToString('o') } elseif ($_.airstamp) { $st = "$($_.airstamp)" }
@@ -521,10 +562,17 @@ function Save-WebFile([string]$Url, [string]$Path) {
         if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
         Initialize-Net
         $wc = New-Object Net.WebClient
-        $wc.DownloadFile($Url, "$Path.part")
+        try {
+            $wc.Headers['User-Agent'] = $script:UserAgent
+            $wc.DownloadFile($Url, "$Path.part")
+        } finally { $wc.Dispose() }
         Move-Item -LiteralPath "$Path.part" -Destination $Path -Force
         return $true
-    } catch { return $false }
+    } catch {
+        # Don't leave half-downloaded pictures behind
+        Remove-Item -LiteralPath "$Path.part" -Force -ErrorAction SilentlyContinue
+        return $false
+    }
 }
 
 function Update-SeriesIndex($info) {
@@ -537,7 +585,7 @@ function Update-SeriesIndex($info) {
         if ($e.Aired -and $e.Aired -ge $today -and -not $next) { $next = "$($e.Aired)|$($e.S)|$($e.E)" }
         if ($e.S -gt 0 -and $e.Aired -and $e.Aired -le $today) { $airedCount++ }
     }
-    $map["$($info.Id)"] = @("$($info.Id)", (Clean-Field $info.Name), (Clean-Field $info.Status), $next, (Clean-Field $info.Network), "$($info.Year)", (Clean-Field (($info.Genres) -join ', ')), "$airedCount", "$($info.Fetched)", "$($info.Tvdb)")
+    $map["$($info.Id)"] = @("$($info.Id)", (ConvertTo-TsvField $info.Name), (ConvertTo-TsvField $info.Status), $next, (ConvertTo-TsvField $info.Network), "$($info.Year)", (ConvertTo-TsvField (($info.Genres) -join ', ')), "$airedCount", "$($info.Fetched)", "$($info.Tvdb)")
     $lines = foreach ($v in $map.Values) { $v -join "`t" }
     Write-TsvLines $path @($lines)
 }
@@ -591,7 +639,7 @@ function Find-ShowMatch($show) {
         if ($y) { $pick = $y[0] }
     }
     if (-not $pick -and $exact) {
-        # Several shows with the same name: prefer the newest one that is still running, else the first
+        # Several shows with the same name and no year on the folder: take TVmaze's best match
         $pick = $exact[0]
     }
     if (-not $pick) { $pick = $results[0]; $how = 'guess' }
@@ -632,7 +680,7 @@ function Get-FilenameIssues($lib, $MatchMap, [switch]$CheckTitles) {
         Set-Progress ("Checking names: {0} ({1}/{2})" -f $show.Name, $i, $shows.Count) ($i / $shows.Count * 100)
         $info = $null
         $m = $MatchMap[$show.Folder]
-        if ($CheckTitles -and $m -and $m.Id -gt 0) { try { $info = Get-SeriesInfo $m.Id } catch {} }
+        if ($CheckTitles -and $m -and $m.Id -gt 0) { try { $info = Get-SeriesInfo $m.Id } catch { Write-Verbose $_.Exception.Message } }
         $epTitles = @{}
         if ($info) { foreach ($e in @($info.Episodes)) { $epTitles["$($e.S)|$($e.E)"] = $e.Title } }
         $showKey = Get-NormKey $show.Folder
@@ -685,19 +733,24 @@ function Invoke-RenameEpisode([string]$Path, [string]$NewFileName) {
     if ($oldBase -ceq $newBase) { return $done }
     $target = Join-Path $dir $NewFileName
     if ((Test-Path -LiteralPath $target) -and ($oldBase -ne $newBase)) { throw "A file called '$NewFileName' already exists." }
+    # Work out every rename first and check none of them would overwrite anything, so a clash
+    # stops the whole episode before any of its files have been touched.
+    $plan = New-Object System.Collections.Generic.List[object]
     foreach ($f in [IO.Directory]::GetFiles($dir)) {
         $n = [IO.Path]::GetFileName($f)
-        if ($n.StartsWith($oldBase, [StringComparison]::OrdinalIgnoreCase)) {
-            $rest = $n.Substring($oldBase.Length)
-            if ($rest -and -not ($rest.StartsWith('.') -or $rest.StartsWith('-'))) { continue }
-            $newPath = Join-Path $dir ($newBase + $rest)
-            if ($n -ieq ($newBase + $rest)) {
-                # case-only change: go via a temp name
-                $tmp = Join-Path $dir ("~tvt~" + [guid]::NewGuid().ToString('N') + $rest)
-                [IO.File]::Move($f, $tmp); [IO.File]::Move($tmp, $newPath)
-            } else { [IO.File]::Move($f, $newPath) }
-            $done.Add("$f`t$newPath")
-        }
+        if ($f -ne $Path -and -not (Test-SidecarName $n $oldBase)) { continue }
+        $newName = $newBase + $n.Substring($oldBase.Length)
+        if ($n -ine $newName -and (Test-Path -LiteralPath (Join-Path $dir $newName))) { throw "A file called '$newName' already exists." }
+        $plan.Add(@($f, (Join-Path $dir $newName), ($n -ieq $newName)))
+    }
+    foreach ($step in $plan) {
+        $f = $step[0]; $newPath = $step[1]
+        if ($step[2]) {
+            # case-only change: go via a temp name
+            $tmp = Join-Path $dir ("~tvt~" + [guid]::NewGuid().ToString('N') + [IO.Path]::GetExtension($f))
+            [IO.File]::Move($f, $tmp); [IO.File]::Move($tmp, $newPath)
+        } else { [IO.File]::Move($f, $newPath) }
+        $done.Add("$f`t$newPath")
     }
     return $done
 }
@@ -746,14 +799,14 @@ function Get-CalendarEpisodes($lib, $MatchMap, [switch]$Refresh) {
         $i++
         $m = $MatchMap[$show.Folder]; if (-not $m -or $m.Id -le 0) { continue }
         $info = $null
-        try { $info = Get-SeriesInfo $m.Id -CacheOnly } catch {}
+        try { $info = Get-SeriesInfo $m.Id -CacheOnly } catch { Write-Verbose $_.Exception.Message }
         $ended = ($info -and "$($info.Status)" -match 'Ended')
         if ($Refresh -and -not $ended) {
             Set-Progress ("Airing info: {0} ({1}/{2})" -f $show.Name, $i, $shows.Count) ($i / [math]::Max(1, $shows.Count) * 100)
             $old = $false
             $eps0 = @($info.Episodes | Where-Object { $_ } | Select-Object -First 1)
             if ($info -and $eps0 -and -not ($eps0[0].PSObject.Properties.Name -contains 'Stamp')) { $old = $true }
-            try { $info = Get-SeriesInfo $m.Id -Force:$old } catch {}
+            try { $info = Get-SeriesInfo $m.Id -Force:$old } catch { Write-Verbose $_.Exception.Message }
         }
         if (-not $info) { continue }
         foreach ($e in @($info.Episodes)) {
@@ -812,7 +865,7 @@ function Get-ProblemFiles($lib) {
                         $t = ''
                         if ($p) {
                             $t = ('S{0:D2}' -f [int]$p.S)
-                            try { foreach ($sd in [IO.Directory]::GetDirectories($show.Path)) { $sn = Get-SeasonFromFolder ([IO.Path]::GetFileName($sd)); if ($null -ne $sn -and [int]$sn -eq [int]$p.S) { $t = [IO.Path]::GetFileName($sd); break } } } catch {}
+                            try { foreach ($sd in [IO.Directory]::GetDirectories($show.Path)) { $sn = Get-SeasonFromFolder ([IO.Path]::GetFileName($sd)); if ($null -ne $sn -and [int]$sn -eq [int]$p.S) { $t = [IO.Path]::GetFileName($sd); break } } } catch { Write-Verbose $_.Exception.Message }
                         }
                         & $add 'Not in a season folder' $f.FullName $(if ($t) { "belongs in $t" } else { "season unknown" }) 'file' $t
                     }
@@ -839,7 +892,7 @@ function Get-ProblemFiles($lib) {
                 if ($script:SkipDirs -contains $ln -or $ln.StartsWith('.') -or $dir -match '\\(@eadir|#recycle)\\') { continue }
                 if (@([IO.Directory]::GetFileSystemEntries($dir)).Count -eq 0) { & $add 'Empty folder' $dir '' 'dir' '' }
             }
-        } catch {}
+        } catch { Write-Verbose $_.Exception.Message }
     }
     Set-Progress ("Problem check finished: {0} item(s)" -f $out.Count) 100
     return $out.ToArray()
@@ -871,20 +924,25 @@ function New-ShowListHtml($lib, $MatchMap, $index, [switch]$Episodes) {
 
 # ===================== UI =====================
 $ErrorActionPreference = 'Continue'
-# Works both as App\TV-Toolkit.ps1 (run by 'Start TV Toolkit.cmd') and as 'TV Toolkit.exe' built by Build-Exe.ps1.
-# The exe sits in the main TV Toolkit folder, so Data is next to it; the script sits in App, so Data is one level up.
+# Runs as src\TV-Toolkit.ps1 (started by 'Start TV Toolkit.cmd') or as 'TV Toolkit v<version>.exe'
+# in the project's Builds folder. Either way, settings and data live in %APPDATA%\TV Toolkit.
 $ExePath = ''
-try { $ExePath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName } catch {}
+try { $ExePath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName } catch { Write-Verbose $_.Exception.Message }
 $IsExe = [bool]($ExePath -and ([IO.Path]::GetFileNameWithoutExtension($ExePath) -notmatch '^(powershell|pwsh|powershell_ise)$'))
 if ($IsExe) {
-    $RootDir = Split-Path -Parent $ExePath
-    $AppDir = Join-Path $RootDir 'App'
+    $AppDir = Split-Path -Parent $ExePath
 } else {
     $AppDir = $PSScriptRoot
     if (-not $AppDir) { $AppDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
-    $RootDir = Split-Path -Parent $AppDir
 }
-$DataDir = Join-Path $RootDir 'Data'
+$DataDir = Join-Path ([Environment]::GetFolderPath('ApplicationData')) $AppName
+# Before v1.00 everything was kept in a 'Data' folder beside the old App folder (or beside the exe).
+# These are the places it could be, so it can be copied across the first time v1.00 starts.
+$OldDataDirs = @(
+    (Join-Path (Split-Path -Parent $AppDir) 'Data')                      # Source\Data, beside src\ (was beside App\)
+    (Join-Path $AppDir 'Data')                                           # beside an old exe
+    (Join-Path (Split-Path -Parent $AppDir) 'Source\Data')               # exe in Builds\, data in Source\Data
+) | Select-Object -Unique
 $StartLog = Join-Path $DataDir 'Logs\startup.log'
 $StartClock = [Diagnostics.Stopwatch]::StartNew()
 function Write-StartLog([string]$Text) {
@@ -892,16 +950,16 @@ function Write-StartLog([string]$Text) {
         $dir = Split-Path -Parent $StartLog
         if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
         [IO.File]::AppendAllText($StartLog, ("[{0}] +{1,5:N1}s  pid {2}  {3}`r`n" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $StartClock.Elapsed.TotalSeconds, $PID, $Text))
-    } catch {}
+    } catch { Write-Verbose $_.Exception.Message }
 }
-try { if ((Test-Path -LiteralPath $StartLog) -and (Get-Item -LiteralPath $StartLog).Length -gt 200KB) { Remove-Item -LiteralPath $StartLog -Force } } catch {}
+try { if ((Test-Path -LiteralPath $StartLog) -and (Get-Item -LiteralPath $StartLog).Length -gt 200KB) { Remove-Item -LiteralPath $StartLog -Force } } catch { Write-Verbose $_.Exception.Message }
 Write-StartLog "Starting v$AppVersion (PowerShell $($PSVersionTable.PSVersion), STA=$([Threading.Thread]::CurrentThread.ApartmentState -eq 'STA'))"
 
 trap {
     $msg = ($_ | Out-String) + "`n" + $_.Exception.ToString() + "`nScript stack:`n" + $_.ScriptStackTrace
     Write-StartLog "CRASH: $($_.Exception.Message)"
-    try { Add-Content -LiteralPath (Join-Path $DataDir 'Logs\crash.log') -Value ("[{0}] {1}" -f (Get-Date), $msg) } catch {}
-    try { [void][Windows.MessageBox]::Show("TV Toolkit hit a problem and has to close:`n`n$($_.Exception.Message)`n`nDetails were saved to Data\Logs\crash.log", 'TV Toolkit', 'OK', 'Error') } catch {}
+    try { Add-Content -LiteralPath (Join-Path $DataDir 'Logs\crash.log') -Value ("[{0}] {1}" -f (Get-Date), $msg) } catch { Write-Verbose $_.Exception.Message }
+    try { [void][Windows.MessageBox]::Show("TV Toolkit hit a problem and has to close:`n`n$($_.Exception.Message)`n`nDetails were saved to:`n$(Join-Path $DataDir 'Logs\crash.log')", 'TV Toolkit', 'OK', 'Error') } catch { Write-Verbose $_.Exception.Message }
     break
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.IO.Compression.FileSystem
@@ -952,6 +1010,37 @@ try {
     Write-StartLog 'Splash shown'
 } catch { Write-StartLog "Splash skipped: $($_.Exception.Message)" }
 
+# ---------- first run of v1.00: copy the old portable Data folder to %APPDATA% ----------
+function Copy-OldDataFolder([string]$From, [string]$To) {
+    # Copies every file across, keeping the folder structure, without overwriting anything already there
+    $fromRoot = (Get-Item -LiteralPath $From).FullName.TrimEnd('\')
+    $n = 0
+    foreach ($f in [IO.Directory]::GetFiles($fromRoot, '*', [IO.SearchOption]::AllDirectories)) {
+        $target = Join-Path $To $f.Substring($fromRoot.Length + 1)
+        if (Test-Path -LiteralPath $target) { continue }
+        $dir = Split-Path -Parent $target
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        [IO.File]::Copy($f, $target)
+        $n++
+    }
+    return $n
+}
+$script:MigratedFrom = $null
+if (-not (Test-Path -LiteralPath (Join-Path $DataDir 'settings.json'))) {
+    $old = @($OldDataDirs | Where-Object { $_ -and (Test-Path -LiteralPath (Join-Path $_ 'settings.json')) } | Select-Object -First 1)
+    if ($old) {
+        try {
+            Write-StartLog "Copying old data from $($old[0]) to $DataDir"
+            if ($Splash) { try { $Splash.FindName('SplashText').Text = 'Moving your data to its new home (first start only)...'; [Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([action]{}, [Windows.Threading.DispatcherPriority]::Background) } catch { Write-Verbose $_.Exception.Message } }
+            $copied = Copy-OldDataFolder $old[0] $DataDir
+            $note = "TV Toolkit v1.00 and later keep their settings and data in:`r`n$DataDir`r`n`r`nEverything in this folder was copied there on $(Get-Date -Format 'd MMMM yyyy HH:mm'). Once you've checked TV Toolkit looks right, you can delete this Data folder."
+            try { [IO.File]::WriteAllText((Join-Path $old[0] 'MOVED - read me.txt'), $note) } catch { Write-Verbose $_.Exception.Message }
+            Write-StartLog "Copied $copied file(s)"
+            $script:MigratedFrom = $old[0]
+        } catch { Write-StartLog "Couldn't copy the old data: $($_.Exception.Message)" }
+    }
+}
+
 foreach ($d in @($DataDir, (Join-Path $DataDir 'Cache\series'), (Join-Path $DataDir 'Cache\posters'), (Join-Path $DataDir 'Cache\people'), (Join-Path $DataDir 'Cache\people-large'), (Join-Path $DataDir 'Cache\people-info'), (Join-Path $DataDir 'Cache\backdrops'), (Join-Path $DataDir 'Cache\epthumbs'), (Join-Path $DataDir 'Backups'), (Join-Path $DataDir 'Logs'), (Join-Path $DataDir 'Exports'))) {
     if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
 }
@@ -967,11 +1056,12 @@ $DOT = [string][char]0x00B7
 # ---------- settings ----------
 $SettingsPath = Join-Path $DataDir 'settings.json'
 function Get-DefaultSettings {
-    return @{ Roots = @('T:\'); HoldFolder = 'T:\_TV Toolkit holding'; RefreshDays = 3
+    # No TV folder is assumed: the first start opens Settings to ask for one
+    return @{ Roots = @(); HoldFolder = ''; RefreshDays = 3
               NewDays = 14; LibView = 'posters'; IgnoreMissing = @()
               MissOwned = $false; MissSpecials = $false; MissContinuing = $false; LibFilter = 0; LibSort = 0 }
 }
-function Load-Settings {
+function Import-Settings {
     $s = Get-DefaultSettings
     $j = Read-JsonFile $SettingsPath
     if ($j) { foreach ($p in $j.PSObject.Properties) { if ($s.ContainsKey($p.Name)) { $s[$p.Name] = $p.Value } } }   # unknown/old keys are dropped
@@ -979,8 +1069,8 @@ function Load-Settings {
     $s.IgnoreMissing = @($s.IgnoreMissing | Where-Object { $_ })
     $TVT.Settings = $s
 }
-function Save-Settings { Write-JsonFile $SettingsPath $TVT.Settings; $script:TvdbAuth = $null }
-Load-Settings
+function Save-Settings { Write-JsonFile $SettingsPath $TVT.Settings }
+Import-Settings
 
 # ---------- window ----------
 $ThemeXaml = @'
@@ -1254,7 +1344,7 @@ $ThemeXaml = @'
 $MainXaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="TV Toolkit" WindowState="Maximized" MinWidth="1100" MinHeight="700" Width="1400" Height="860"
+        Title="TV Toolkit" WindowState="Maximized" MinWidth="1100" MinHeight="640" Width="1400" Height="860"
         Background="#101318" Foreground="#E9ECF2" FontFamily="Segoe UI" FontSize="13" UseLayoutRounding="True" TextOptions.TextFormattingMode="Display">
     <Window.Resources>
 <!--THEME-->
@@ -2124,7 +2214,7 @@ $MainXaml = @'
                         <Border Style="{StaticResource Card}" Margin="0,0,0,14">
                             <StackPanel>
                                 <TextBlock Text="Backups" Style="{StaticResource H2}"/>
-                                <TextBlock Style="{StaticResource Hint}" Margin="0,0,0,12" Text="A backup holds your settings and show matches (not the image cache). The last 15 are kept in Data\Backups. A backup is also made automatically before any restore."/>
+                                <TextBlock Style="{StaticResource Hint}" Margin="0,0,0,12" Text="A backup holds your settings and show matches (not the image cache). The last 15 are kept in the Backups folder (Open data folder, below). A backup is also made automatically before any restore."/>
                                 <WrapPanel>
                                     <Button x:Name="btnBackup" Content="Back up now" Style="{StaticResource AccentButton}"/>
                                     <Button x:Name="btnRestore" Content="Restore from backup..."/>
@@ -2135,7 +2225,7 @@ $MainXaml = @'
                         <Border Style="{StaticResource Card}" Margin="0,0,0,14">
                             <StackPanel>
                                 <TextBlock Text="Move settings between PCs" Style="{StaticResource H2}"/>
-                                <TextBlock Style="{StaticResource Hint}" Margin="0,0,0,12" Text="Export a single file with your settings, API keys and show matches, then import it on the other PC. Your library is rescanned there."/>
+                                <TextBlock Style="{StaticResource Hint}" Margin="0,0,0,12" Text="Export a single file with your settings and show matches, then import it on the other PC. Your library is rescanned there."/>
                                 <WrapPanel>
                                     <Button x:Name="btnExportSettings" Content="Export settings..."/>
                                     <Button x:Name="btnImportSettings" Content="Import settings..."/>
@@ -2156,7 +2246,7 @@ $MainXaml = @'
                             <StackPanel>
                                 <TextBlock Text="Housekeeping" Style="{StaticResource H2}"/>
                                 <WrapPanel>
-                                    <Button x:Name="btnOpenData" Content="Open Data folder"/>
+                                    <Button x:Name="btnOpenData" Content="Open data folder" ToolTip="Settings, show matches, cache, logs and backups (%APPDATA%\TV Toolkit)"/>
                                     <Button x:Name="btnRematchAll" Content="Re-match unmatched shows"/>
                                     <Button x:Name="btnRefreshAll" Content="Refresh all show info"/>
                                     <Button x:Name="btnReadMedia" Content="Re-read video details" ToolTip="Read resolution and length from every episode file again"/>
@@ -2191,7 +2281,7 @@ $MainXaml = @'
                                     <TextBox x:Name="txtRefreshDays" Width="60"/>
                                     <TextBlock Style="{StaticResource Hint}" VerticalAlignment="Center" Margin="10,0,0,0" Text="for continuing shows (ended shows: every 30 days)"/>
                                 </StackPanel>
-                                <WrapPanel Margin="0,10,0,0"><Button x:Name="btnTestTvdb" Content="Test TVmaze"/><TextBlock x:Name="txtTvdbTest" Foreground="{StaticResource Sub}" VerticalAlignment="Center"/></WrapPanel>
+                                <WrapPanel Margin="0,10,0,0"><Button x:Name="btnTestMaze" Content="Test TVmaze"/><TextBlock x:Name="txtMazeTest" Foreground="{StaticResource Sub}" VerticalAlignment="Center"/></WrapPanel>
                             </StackPanel>
                         </Border>
                         <Border Style="{StaticResource Card}" Margin="0,0,0,14">
@@ -2233,7 +2323,7 @@ $MainXaml = @'
                                 <TextBlock Text="Credits" Style="{StaticResource H2}"/>
                                 <Grid Margin="0,4,0,0">
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="190"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                    <Grid.RowDefinitions><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/></Grid.RowDefinitions>
+                                    <Grid.RowDefinitions><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/></Grid.RowDefinitions>
                                     <TextBlock Grid.Row="0" Text="Made by" Foreground="{StaticResource Sub}" Margin="0,0,0,10"/>
                                     <TextBlock Grid.Row="0" Grid.Column="1" TextWrapping="Wrap" Margin="0,0,0,10">Jason Rhodes, built with Claude (Anthropic)</TextBlock>
                                     <TextBlock Grid.Row="1" Text="Show information" Foreground="{StaticResource Sub}" Margin="0,0,0,10"/>
@@ -2242,6 +2332,8 @@ $MainXaml = @'
                                     <TextBlock Grid.Row="2" Grid.Column="1" TextWrapping="Wrap" Margin="0,0,0,10">Windows PowerShell and WPF (.NET). Fonts: Bahnschrift and Segoe UI from Microsoft Windows.</TextBlock>
                                     <TextBlock Grid.Row="3" Text="Images" Foreground="{StaticResource Sub}" Margin="0,0,0,10"/>
                                     <TextBlock Grid.Row="3" Grid.Column="1" TextWrapping="Wrap" Margin="0,0,0,10">Posters and photos remain the property of their respective owners and are shown for personal use.</TextBlock>
+                                    <TextBlock Grid.Row="5" Text="Source and licence" Foreground="{StaticResource Sub}" Margin="0,10,0,0"/>
+                                    <TextBlock Grid.Row="5" Grid.Column="1" TextWrapping="Wrap" Margin="0,10,0,0"><Hyperlink NavigateUri="https://github.com/jason4bury/TV-Toolkit" Foreground="{StaticResource Accent}">github.com/jason4bury/TV-Toolkit</Hyperlink> - free and open source under the MIT licence. TV Toolkit isn't affiliated with or endorsed by TVmaze.</TextBlock>
                                     <TextBlock Grid.Row="4" Text="Look" Foreground="{StaticResource Sub}"/>
                                     <TextBlock Grid.Row="4" Grid.Column="1" TextWrapping="Wrap">"Test Card" theme - colour bars, slate and cyan.</TextBlock>
                                 </Grid>
@@ -2321,16 +2413,16 @@ function New-Window([string]$xamlText) {
 $main = New-Window $MainXaml
 Write-StartLog 'Main window built'
 $Win = $main.Window
-# Window and taskbar icon: App\TV-Toolkit.ico if it's there, otherwise the icon built into the exe
+# Window and taskbar icon: assets\TV-Toolkit.ico when running the script, otherwise the icon built into the exe
 try {
-    $ico = Join-Path $AppDir 'TV-Toolkit.ico'
-    if (Test-Path -LiteralPath $ico) { $Win.Icon = [Windows.Media.Imaging.BitmapFrame]::Create([Uri]::new($ico)) }
+    $ico = Join-Path (Split-Path -Parent $AppDir) 'assets\TV-Toolkit.ico'
+    if (-not $IsExe -and (Test-Path -LiteralPath $ico)) { $Win.Icon = [Windows.Media.Imaging.BitmapFrame]::Create([Uri]::new($ico)) }
     elseif ($IsExe) {
         Add-Type -AssemblyName System.Drawing
         $hi = [Drawing.Icon]::ExtractAssociatedIcon($ExePath)
         $Win.Icon = [Windows.Interop.Imaging]::CreateBitmapSourceFromHIcon($hi.Handle, [Windows.Int32Rect]::Empty, [Windows.Media.Imaging.BitmapSizeOptions]::FromEmptyOptions())
     }
-} catch {}
+} catch { Write-Verbose $_.Exception.Message }
 $ui = $main.UI
 
 # ---------- helpers ----------
@@ -2403,7 +2495,7 @@ function Update-HeadStats {
     $items.Add([pscustomobject]@{ Value = (Format-SizeWhole $size); Label = 'used'; Go = 'tStats'; Tip = 'Space your TV takes up - click for stats'; Brush = $sub })
     $free = [double]0; $total = [double]0; $letters = @{}
     foreach ($r in @($TVT.Settings.Roots)) { if ("$r" -match '^([A-Za-z]):') { $letters[$Matches[1].ToUpper()] = $true } }
-    foreach ($l in $letters.Keys) { try { $di = [IO.DriveInfo]::new($l); if ($di.IsReady) { $free += $di.AvailableFreeSpace; $total += $di.TotalSize } } catch {} }
+    foreach ($l in $letters.Keys) { try { $di = [IO.DriveInfo]::new($l); if ($di.IsReady) { $free += $di.AvailableFreeSpace; $total += $di.TotalSize } } catch { Write-Verbose $_.Exception.Message } }
     if ($total -gt 0) {
         $pct = ($total - $free) / $total * 100
         $fb = $(if ($pct -ge 90) { 'Bad' } elseif ($pct -ge 75) { 'Warn' } else { 'Text' })
@@ -2424,7 +2516,7 @@ function Get-Initials([string]$name) {
     if ($ini.Length -gt 2) { $ini = $ini.Substring(0, 1) + $ini.Substring($ini.Length - 1) }
     return $ini
 }
-function Get-PersonKey($c) { $perId = 0; try { $perId = [int]$c.PersonId } catch {}; if ($perId -gt 0) { return "p$perId" }; return "n:" + "$($c.Name)".ToLowerInvariant() }
+function Get-PersonKey($c) { $perId = 0; try { $perId = [int]$c.PersonId } catch { Write-Verbose $_.Exception.Message }; if ($perId -gt 0) { return "p$perId" }; return "n:" + "$($c.Name)".ToLowerInvariant() }
 function Get-PersonPhotoPath([string]$url) { if (-not $url) { return '' }; return (Join-Path $DataDir ("Cache\people\" + (Get-HashName $url) + '.jpg')) }
 function Get-CachedBitmap([string]$path, [int]$width) {
     if (-not $path) { return $null }
@@ -2459,7 +2551,7 @@ function Start-Work([string]$Label, [scriptblock]$Work, [object[]]$ArgList = @()
     [void]$ps.AddScript({
         param($core, $dataDir, $settings, $sync, $work, $argv)
         $ErrorActionPreference = 'Stop'
-        $TVT = @{ DataDir = $dataDir; Settings = $settings; Sync = $sync }
+        $script:TVT = @{ DataDir = $dataDir; Settings = $settings; Sync = $sync }
         . ([scriptblock]::Create($core))
         Initialize-Net
         & ([scriptblock]::Create($work)) @argv
@@ -2481,8 +2573,8 @@ $timer.Add_Tick({
             $Win.Show(); $Win.Activate() | Out-Null
             $Win.Topmost = $true; $Win.Topmost = $false
             [void]$Win.Focus()
-        } catch {}
-        try { [void]$script:AckEvent.Set() } catch {}
+        } catch { Write-Verbose $_.Exception.Message }
+        try { [void]$script:AckEvent.Set() } catch { Write-Verbose $_.Exception.Message }
     }
     if ($script:Jobs.Count -gt 0) {
         $ui.txtStatus.Text = $Sync.Status
@@ -2497,7 +2589,7 @@ $timer.Add_Tick({
         $errText = $null
         if ($err) { $errText = $err.Message }
         elseif ((-not $res -or $res.Count -eq 0) -and $j.PS.Streams.Error.Count -gt 0) { $errText = ($j.PS.Streams.Error | Select-Object -First 2 | ForEach-Object { $_.ToString() }) -join "`n" }
-        try { $j.PS.Dispose(); $j.RS.Close(); $j.RS.Dispose() } catch {}
+        try { $j.PS.Dispose(); $j.RS.Close(); $j.RS.Dispose() } catch { Write-Verbose $_.Exception.Message }
         if ($script:Jobs.Count -eq 0) { $ui.pbStatus.Visibility = 'Hidden'; $ui.txtStatus.Text = $Sync.Status }
         if ($j.OnDone) {
             try { & $j.OnDone $res $errText $j.Context } catch { Show-Msg "Something went wrong after '$($j.Label)':`n$($_.Exception.Message)" 'TV Toolkit' 'Warning' }
@@ -2516,7 +2608,6 @@ $script:MissingRows = @()
 $script:MissingChecked = $false
 $script:LastRenameLog = $null
 $script:People = @{}
-$script:PeopleDirty = $true
 $script:CastStale = @()
 $script:CastPhotosAsked = @{}
 $script:CalOffset = 0
@@ -2595,7 +2686,7 @@ function Get-LatestSeasonState($show) {
     $script:SeasonCache[$show.Folder] = $c
     return $c
 }
-function Refresh-Library {
+function Update-LibraryView {
     $search = $ui.txtSearch.Text.Trim().ToLowerInvariant()
     $filter = $ui.cmbLibFilter.SelectedIndex
     $today = Get-Today
@@ -2671,7 +2762,7 @@ function Refresh-Library {
         $it.Poster = $script:BitmapCache[$it.PosterPath]
     }
     $ui.icShows.ItemsSource = $sorted
-    if ($ui.dgLibList.Visibility -eq 'Visible') { $ui.dgLibList.ItemsSource = $sorted; if ($script:LibSortKey) { Sort-LibList $script:LibSortKey $script:LibSortDesc } }
+    if ($ui.dgLibList.Visibility -eq 'Visible') { $ui.dgLibList.ItemsSource = $sorted; if ($script:LibSortKey) { Set-LibListSort $script:LibSortKey $script:LibSortDesc } }
     $ui.txtLibCount.Text = "$($sorted.Count) of $($script:Lib.Count) shows"
     Update-HeadStats
     if ($script:Lib.Count -eq 0) { $ui.spEmpty.Visibility = 'Visible' } else { $ui.spEmpty.Visibility = 'Collapsed' }
@@ -2685,11 +2776,11 @@ function Start-LoadLibrary([switch]$ThenMatch) {
         $script:Lib = $null
         if ($res -and $res.Count -gt 0) { $script:Lib = $res[0].Lib }
         if ($null -eq $script:Lib) { $script:Lib = [ordered]@{} }
-        Refresh-Library
+        Update-LibraryView
         Update-NewTabHeader
         $script:CalDirty = $true
         Start-MediaProbe
-        if ($ui.tabMain.SelectedItem -eq $ui.tNew) { Refresh-NewPage }
+        if ($ui.tabMain.SelectedItem -eq $ui.tNew) { Update-NewPage }
         if ($script:CurrentShow -and $script:Lib.Contains($script:CurrentShow.Folder)) { Open-Show $script:CurrentShow.Folder -Keep } elseif ($script:CurrentShow) { Close-Show }
         Set-Status "Library loaded: $($script:Lib.Count) shows."
         try { Update-SinceCard } catch { Set-Status "Library loaded: $($script:Lib.Count) shows. (Couldn't build the 'since last time' card: $($_.Exception.Message))" }
@@ -2724,7 +2815,7 @@ function Start-MatchJob([switch]$RefreshAll) {
                 if ($m) { $new[$s.Folder] = $m } elseif (-not $threw) { $failed += "$($s.Folder): TVmaze found nothing for '$($s.Name)'" }
             }
             if ($m -and $m.Id -gt 0) {
-                try { Get-SeriesInfo $m.Id -Force:$refreshAll | Out-Null } catch {}
+                try { Get-SeriesInfo $m.Id -Force:$refreshAll | Out-Null } catch { Write-Verbose $_.Exception.Message }
             }
             # Copy a local poster (e.g. from Kodi) into the cache if TVmaze had none
             $cacheP = $(if ($m -and $m.Id -gt 0) { Get-PosterCachePath $m.Id } else { '' })
@@ -2732,7 +2823,7 @@ function Start-MatchJob([switch]$RefreshAll) {
                 $md5 = [Security.Cryptography.MD5]::Create()
                 $hn = (($md5.ComputeHash([Text.Encoding]::UTF8.GetBytes($s.Folder)) | ForEach-Object { $_.ToString('x2') }) -join '')
                 $lp = Join-Path $TVT.DataDir ("Cache\posters\local-$hn.jpg")
-                if (-not (Test-Path -LiteralPath $lp)) { try { Copy-Item -LiteralPath (Join-Path $s.Path $s.LocalPoster) -Destination $lp -Force } catch {} }
+                if (-not (Test-Path -LiteralPath $lp)) { try { Copy-Item -LiteralPath (Join-Path $s.Path $s.LocalPoster) -Destination $lp -Force } catch { Write-Verbose $_.Exception.Message } }
             }
         }
         Set-Progress ("TVmaze: matched {0} new show(s)" -f $new.Count) 100
@@ -2747,15 +2838,15 @@ function Start-MatchJob([switch]$RefreshAll) {
             $failed = @($res[0].Failed)
             if ($guesses -gt 0) { Set-Status "TVmaze done. $guesses show(s) were a best guess - use the 'Needs a match check' filter to check them." }
             if ($failed.Count -gt 0) {
-                Set-Status "TVmaze: matched $($res[0].New.Count), couldn't match $($failed.Count). Details in Data\Logs\tvinfo.log"
+                Set-Status "TVmaze: matched $($res[0].New.Count), couldn't match $($failed.Count). Details in Logs\tvinfo.log in the data folder (Utilities > Open data folder)"
                 if ($res[0].New.Count -eq 0) {
-                    Show-Msg ("TVmaze didn't match any shows. First problems:`n`n" + (($failed | Select-Object -First 4) -join "`n`n") + "`n`nFull details are in Data\Logs\tvinfo.log") 'TV Toolkit' 'Warning'
+                    Show-Msg ("TVmaze didn't match any shows. First problems:`n`n" + (($failed | Select-Object -First 4) -join "`n`n") + "`n`nFull details are in:`n" + (Join-Path $DataDir 'Logs\tvinfo.log')) 'TV Toolkit' 'Warning'
                 }
             }
         }
         $script:Index = Import-SeriesIndex; $script:PeopleDirty = $true
         $script:BitmapCache = @{}
-        Refresh-Library
+        Update-LibraryView
         if ($script:CurrentShow) { Open-Show $script:CurrentShow.Folder -Keep }
     } 'info' | Out-Null
 }
@@ -2852,7 +2943,7 @@ function Open-Show([string]$Folder, [switch]$Keep) {
     if (-not $pick) { $pick = $chips | Where-Object { $show.Seasons -contains $_.S -and $_.S -gt 0 } | Select-Object -Last 1 }
     if (-not $pick -and $chips.Count) { $pick = $chips[0] }
     $ui.lbSeasons.SelectedItem = $pick
-    Fill-Episodes
+    Update-EpisodeList
 
     if ($id -gt 0 -and -not $info -and -not $Keep -and -not $script:BusyGroups['info']) {
         Start-Work 'Fetching show info' { param($id) Get-SeriesInfo $id | Out-Null } @($id) {
@@ -2860,7 +2951,7 @@ function Open-Show([string]$Folder, [switch]$Keep) {
             $script:Index = Import-SeriesIndex; $script:PeopleDirty = $true
             $script:BitmapCache = @{}
             if ($script:CurrentShow -and $script:CurrentShow.Folder -eq $ctx) { Open-Show $ctx -Keep }
-            Refresh-Library
+            Update-LibraryView
             if ($err) { Set-Status "Show info: $err" }
         } 'info' $Folder | Out-Null
     }
@@ -2902,7 +2993,7 @@ function Request-EpisodeThumbs($rows, $info, [scriptblock]$Then) {
         if ($then) { & $then }
     } '' $Then | Out-Null
 }
-function Fill-Episodes {
+function Update-EpisodeList {
     $show = $script:CurrentShow; if (-not $show) { return }
     $info = $script:CurrentInfo
     $sel = $ui.lbSeasons.SelectedItem
@@ -2940,17 +3031,18 @@ function Fill-Episodes {
     }
     $ui.dgEpisodes.ItemsSource = @($rows | Sort-Object E)
     $ui.txtEpOverview.Text = ''
-    Request-EpisodeThumbs $rows $info { if ($script:CurrentShow) { Fill-Episodes } }
+    Request-EpisodeThumbs $rows $info { if ($script:CurrentShow) { Update-EpisodeList } }
 }
 
-function Play-File($show, [int]$s, [int]$e, [string]$path) {
+function Start-EpisodeFile([string]$path) {
+    # Opens the episode in whatever player Windows uses for that file type
     if (-not $path -or -not (Test-Path -LiteralPath $path)) { Show-Msg "Can't find the file:`n$path" 'TV Toolkit' 'Warning'; return }
     try { Start-Process -FilePath $path } catch { Show-Msg "Couldn't start a player:`n$($_.Exception.Message)" 'TV Toolkit' 'Warning'; return }
 }
-function Refresh-ShowViews {
+function Update-ShowViews {
     if ($script:CurrentShow) { Open-Show $script:CurrentShow.Folder -Keep }
-    Refresh-Library
-    if ($ui.tabMain.SelectedItem -eq $ui.tNew) { Refresh-NewPage } else { Update-NewTabHeader }
+    Update-LibraryView
+    if ($ui.tabMain.SelectedItem -eq $ui.tNew) { Update-NewPage } else { Update-NewTabHeader }
 }
 
 # ---------- new episodes page ----------
@@ -2971,7 +3063,7 @@ function Update-NewTabHeader {
     $ui.tNew.Header = $(if ($n -gt 0) { "New  ($n)" } else { 'New' })
     Update-HeadStats
 }
-function Refresh-NewPage {
+function Update-NewPage {
     $all = $false
     $cutoff = Get-NewRangeCutoff
     $rows = New-Object System.Collections.Generic.List[object]
@@ -3006,11 +3098,11 @@ function Refresh-NewPage {
         }
         if ($old.Count -and -not $script:BusyGroups['info']) {
             $al = New-Object object[] 1; $al[0] = $old.ToArray()
-            Start-Work "Getting episode pictures for $($old.Count) show(s)" { param($ids) foreach ($i in $ids) { try { Get-SeriesInfo $i -Force | Out-Null } catch {} } } $al {
+            Start-Work "Getting episode pictures for $($old.Count) show(s)" { param($ids) foreach ($i in $ids) { try { Get-SeriesInfo $i -Force | Out-Null } catch { Write-Verbose $_.Exception.Message } } } $al {
                 param($res, $err)
-                if ($ui.tabMain.SelectedItem -eq $ui.tNew) { Refresh-NewPage }
+                if ($ui.tabMain.SelectedItem -eq $ui.tNew) { Update-NewPage }
             } 'info' | Out-Null
-        } else { Request-EpisodeThumbs $sorted $null { if ($ui.tabMain.SelectedItem -eq $ui.tNew) { Refresh-NewPage } } }
+        } else { Request-EpisodeThumbs $sorted $null { if ($ui.tabMain.SelectedItem -eq $ui.tNew) { Update-NewPage } } }
     }
 }
 
@@ -3028,18 +3120,18 @@ function Start-MediaProbe([switch]$All) {
         param($res, $err)
         if ($err) { Set-Status "Video details: $err"; return }
         $r = $res[0]; $script:MediaResult = $r
-        Apply-MediaInfo
+        Update-MediaInfo
         if ($r.Checked -gt 0) {
             $msg = "Video details: read $($r.Ok) of $($r.Checked) file(s)."
             if ($r.Failed -gt 0 -and -not $r.FFprobe) { $msg += " $($r.Failed) couldn't be read - installing ffprobe (winget install Gyan.FFmpeg) would let TV Toolkit read them." }
             Set-Status $msg
         }
-        if ($ui.tabMain.SelectedItem -eq $ui.tStats) { Refresh-Stats }
-        elseif ($ui.tabMain.SelectedItem -eq $ui.tDupes) { Refresh-Dupes }
-        if ($script:CurrentShow) { Fill-Episodes }
+        if ($ui.tabMain.SelectedItem -eq $ui.tStats) { Update-StatsPage }
+        elseif ($ui.tabMain.SelectedItem -eq $ui.tDupes) { Update-DupesPage }
+        if ($script:CurrentShow) { Update-EpisodeList }
     } 'media' $null -Sta:$true | Out-Null
 }
-function Apply-MediaInfo {
+function Update-MediaInfo {
     $media = Import-MediaInfo
     foreach ($show in $script:Lib.Values) {
         foreach ($f in $show.Files) {
@@ -3057,7 +3149,7 @@ $script:ProblemRows = @()
 $script:ProblemsChecked = $false
 $ui.cmbProbType.ItemsSource = @('Everything')
 $ui.cmbProbType.SelectedIndex = 0
-function Refresh-ProblemGrid {
+function Update-ProblemGrid {
     $sel = "$($ui.cmbProbType.SelectedItem)"
     $rows = @($script:ProblemRows | Where-Object { -not $sel -or $sel -eq 'Everything' -or $sel -like "$($_.Type) (*" })
     $ui.dgProblems.ItemsSource = @($rows | Sort-Object Type, Show, File)
@@ -3074,24 +3166,24 @@ function Start-ProblemCheck {
         $ui.cmbProbType.ItemsSource = @('Everything') + $types
         $hit = @($ui.cmbProbType.ItemsSource | Where-Object { $_ -and $keep -and $_.Split('(')[0] -eq $keep.Split('(')[0] } | Select-Object -First 1)
         $ui.cmbProbType.SelectedItem = $(if ($hit) { $hit[0] } else { 'Everything' })
-        Refresh-ProblemGrid
+        Update-ProblemGrid
         Set-Status "Problem check done: $($script:ProblemRows.Count) item(s)."
     } 'problems' | Out-Null
 }
 function Move-WithSidecars([string]$path, [string]$destDir) {
-    # Moves a file plus anything sharing its name (subtitles, .nfo, -thumb.jpg) into destDir
-    if (-not (Test-Path -LiteralPath $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
+    # Moves a file plus anything that belongs with it (subtitles, .nfo, -thumb.jpg) into destDir.
+    # Another video with the same name (e.g. the .mkv copy of a duplicate .avi) stays where it is.
+    # If another copy stays behind, the subtitles and artwork stay with that copy.
     $dir = Split-Path -Parent $path; $base = [IO.Path]::GetFileNameWithoutExtension($path)
-    foreach ($f in [IO.Directory]::GetFiles($dir)) {
+    $all = [IO.Directory]::GetFiles($dir)
+    $otherCopy = @($all | Where-Object { $_ -ne $path -and [IO.Path]::GetFileNameWithoutExtension($_) -eq $base -and $script:VideoExt -contains [IO.Path]::GetExtension($_).ToLowerInvariant() }).Count -gt 0
+    $files = @($all | Where-Object { $_ -eq $path -or (-not $otherCopy -and (Test-SidecarName ([IO.Path]::GetFileName($_)) $base)) })
+    foreach ($f in $files) {
         $n = [IO.Path]::GetFileName($f)
-        if ($f -eq $path -or $n.StartsWith($base, [StringComparison]::OrdinalIgnoreCase)) {
-            $rest = $n.Substring([math]::Min($n.Length, $base.Length))
-            if ($f -ne $path -and $rest -and -not ($rest.StartsWith('.') -or $rest.StartsWith('-'))) { continue }
-            $target = Join-Path $destDir $n
-            if (Test-Path -LiteralPath $target) { throw "'$n' already exists in $destDir" }
-            Move-Item -LiteralPath $f -Destination $target
-        }
+        if (Test-Path -LiteralPath (Join-Path $destDir $n)) { throw "'$n' already exists in $destDir" }
     }
+    if (-not (Test-Path -LiteralPath $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
+    foreach ($f in $files) { Move-Item -LiteralPath $f -Destination (Join-Path $destDir ([IO.Path]::GetFileName($f))) }
 }
 
 # ---------- stats page ----------
@@ -3152,7 +3244,7 @@ function Format-Duration([double]$minutes) {
     if ($h -ge 48) { return ('{0:N1} days' -f ($h / 24)) }
     return ('{0:N0} h' -f $h)
 }
-function Refresh-Stats {
+function Update-StatsPage {
     $ui.txtStatsWhen.Text = "Your library as of $(Get-Date -Format 'dddd d MMMM, HH:mm')"
     $shows = @($script:Lib.Values)
     $eps = 0; $files = 0; $size = [int64]0; $seasons = 0
@@ -3186,7 +3278,7 @@ function Refresh-Stats {
         if ($show.Size -gt 0) { $big += [pscustomobject]@{ Label = $show.Folder; Value = [double]$show.Size } }
         if ($show.EpisodeCount -gt 0) { $most += [pscustomobject]@{ Label = $show.Folder; Value = $show.EpisodeCount } }
     }
-    if ($script:PeopleDirty) { try { Build-CastIndex } catch {} }
+    if ($script:PeopleDirty) { try { Build-CastIndex } catch { Write-Verbose $_.Exception.Message } }
     $tiles = @(
         [pscustomobject]@{ Label = 'Shows'; Value = "$($shows.Count)"; Sub = "$cont continuing $DOT $ended ended$(if ($waiting) { " $DOT $waiting waiting" })"; Tip = "$($shows.Count) show folders on your TV drive" }
         [pscustomobject]@{ Label = 'Episodes on disk'; Value = ('{0:N0}' -f $eps); Sub = "$seasons seasons $DOT $files files"; Tip = "$eps episodes in $files video files" }
@@ -3269,9 +3361,9 @@ function Export-CalendarIcs {
     & $add 'END:VCALENDAR'
     try { [IO.File]::WriteAllText($dlg.FileName, $sb.ToString(), (New-Object Text.UTF8Encoding($false))) } catch { Show-Msg "Couldn't save the file:`n$($_.Exception.Message)" 'TV Toolkit' 'Warning'; return }
     Set-Status "Saved $($up.Count) episode(s) to $($dlg.FileName)"
-    if (Confirm-Action "Saved $($up.Count) upcoming episode(s) to:`n$($dlg.FileName)`n`nOpen it now? Outlook (or your calendar app) will offer to add them. Saving again later and re-importing updates the same entries rather than doubling them.") { try { Start-Process -FilePath $dlg.FileName } catch {} }
+    if (Confirm-Action "Saved $($up.Count) upcoming episode(s) to:`n$($dlg.FileName)`n`nOpen it now? Outlook (or your calendar app) will offer to add them. Saving again later and re-importing updates the same entries rather than doubling them.") { try { Start-Process -FilePath $dlg.FileName } catch { Write-Verbose $_.Exception.Message } }
 }
-function Refresh-CalendarView {
+function Update-CalendarView {
     $today = (Get-Date).Date
     $start = $today.AddDays(7 * $script:CalOffset)
     $end = $start.AddDays(6)
@@ -3329,7 +3421,7 @@ function Start-CalendarLoad([switch]$Refresh) {
         if ($res -and $res.Count) { $script:CalRows = @($res[0].Rows | Where-Object { $_ }) }
         $script:CalLoaded = $true
         if ($wasRefresh) { $script:Index = Import-SeriesIndex; $script:CalRefreshedThisRun = $true }
-        if ($ui.tabMain.SelectedItem -eq $ui.tCalendar) { Refresh-CalendarView }
+        if ($ui.tabMain.SelectedItem -eq $ui.tCalendar) { Update-CalendarView }
         # first visit: show what's cached straight away, then quietly bring airing info up to date
         if (-not $wasRefresh -and -not $script:CalRefreshedThisRun -and -not $script:BusyGroups['info']) { Start-CalendarLoad -Refresh }
     } $(if ($Refresh) { 'info' } else { '' }) ([bool]$Refresh) | Out-Null
@@ -3356,7 +3448,7 @@ function Build-CastIndex {
             $key = Get-PersonKey $c
             $e = $people[$key]
             if (-not $e) {
-                $perId = 0; try { $perId = [int]$c.PersonId } catch {}
+                $perId = 0; try { $perId = [int]$c.PersonId } catch { Write-Verbose $_.Exception.Message }
                 $e = [pscustomobject]@{ Key = $key; PersonId = $perId; Name = "$($c.Name)"; Image = "$($c.Image)"; Shows = (New-Object System.Collections.Generic.List[object]); BestOrder = 999 }
                 $people[$key] = $e
             }
@@ -3370,7 +3462,7 @@ function Build-CastIndex {
     $script:PeopleDirty = $false
 }
 
-function Refresh-CastWall {
+function Update-CastWall {
     if ($script:PeopleDirty) { Build-CastIndex }
     $q = $ui.txtCastSearch.Text.Trim().ToLowerInvariant()
     $f = $ui.cmbCastFilter.SelectedIndex
@@ -3406,7 +3498,7 @@ function Refresh-CastWall {
     if ($needPhotos.Count -gt 0) {
         Start-Work "Fetching $($needPhotos.Count) cast photo(s)" { param($list) $i = 0; foreach ($p in $list) { $i++; Set-Progress ("Cast photos {0}/{1}" -f $i, $list.Count) ($i / $list.Count * 100); Save-WebFile $p[0] $p[1] | Out-Null } } @(, $needPhotos.ToArray()) {
             param($res, $err)
-            if ($ui.tabMain.SelectedItem -eq $ui.tCast) { Refresh-CastWall }
+            if ($ui.tabMain.SelectedItem -eq $ui.tCast) { Update-CastWall }
         } 'castphotos' | Out-Null
     }
 }
@@ -3417,14 +3509,14 @@ function Start-CastUpgrade {
     $ids = @($script:CastStale)
     Start-Work "Updating cast details for $($ids.Count) show(s)" {
         param($ids) $i = 0
-        foreach ($id in $ids) { $i++; Set-Progress ("Cast details {0}/{1}" -f $i, $ids.Count) ($i / $ids.Count * 100); try { Get-SeriesInfo $id -Force | Out-Null } catch {} }
+        foreach ($id in $ids) { $i++; Set-Progress ("Cast details {0}/{1}" -f $i, $ids.Count) ($i / $ids.Count * 100); try { Get-SeriesInfo $id -Force | Out-Null } catch { Write-Verbose $_.Exception.Message } }
         Set-Progress 'Cast details up to date' 100
     } @(, $ids) {
         param($res, $err)
         $script:PeopleDirty = $true
         $script:Index = Import-SeriesIndex
         if ($ui.tabMain.SelectedItem -eq $ui.tCast) {
-            Refresh-CastWall
+            Update-CastWall
             # carry the open person over to their new key
             if ($script:CurrentPersonKey -and $script:CurrentPersonKey.StartsWith('n:')) {
                 $hit = @($script:People.Values | Where-Object { $_.Name.ToLowerInvariant() -eq $script:CurrentPersonKey.Substring(2) } | Select-Object -First 1)
@@ -3434,7 +3526,7 @@ function Start-CastUpgrade {
     } 'info' | Out-Null
 }
 
-function Refresh-CastPage { Refresh-CastWall; Start-CastUpgrade }
+function Update-CastPage { Update-CastWall; Start-CastUpgrade }
 
 function Format-Age([string]$from, [string]$to) {
     try {
@@ -3454,7 +3546,7 @@ function Open-Person([string]$Key, [string]$ReturnFolder = $null, [string]$Fallb
     }
     $script:CurrentPersonKey = $Key
     $script:PersonReturn = $ReturnFolder
-    if ($ui.tabMain.SelectedItem -ne $ui.tCast) { $script:SkipCastRefresh = $true; $ui.tabMain.SelectedItem = $ui.tCast; $script:SkipCastRefresh = $false; Refresh-CastWall }
+    if ($ui.tabMain.SelectedItem -ne $ui.tCast) { $script:SkipCastRefresh = $true; $ui.tabMain.SelectedItem = $ui.tCast; $script:SkipCastRefresh = $false; Update-CastWall }
     $ui.bdPerson.Visibility = 'Visible'
     $ui.txtPersonName.Text = $e.Name
     $ui.txtPersonInitials.Text = Get-Initials $e.Name
@@ -3524,7 +3616,7 @@ function Show-PersonDetails($p) {
 }
 
 # ---------- missing ----------
-function Refresh-MissingGrid {
+function Update-MissingGrid {
     $flt = $ui.txtMissFilter.Text.Trim().ToLowerInvariant()
     $rows = @($script:MissingRows | Where-Object { -not $flt -or $_.Show.ToLowerInvariant() -like "*$flt*" })
     $ui.dgMissing.ItemsSource = $rows
@@ -3545,7 +3637,7 @@ function Start-MissingCheck {
         if ($err) { Set-Status "Missing check: $err" }
         $script:MissingRows = @($res | Where-Object { $_ } | Sort-Object Show, S, E)
         $script:MissingChecked = $true
-        Refresh-MissingGrid
+        Update-MissingGrid
         $script:Index = Import-SeriesIndex; $script:PeopleDirty = $true
         if ($unmatched -gt 0) { Set-Status "Missing check done. $unmatched show(s) aren't matched yet and were skipped." } else { Set-Status 'Missing check done.' }
     } 'info' $unmatched | Out-Null
@@ -3553,7 +3645,7 @@ function Start-MissingCheck {
 
 # ---------- filenames ----------
 $script:NameRows = @()
-function Refresh-NamesGrid {
+function Update-NamesGrid {
     $rows = @($script:NameRows | Where-Object { -not ($ui.chkNamesHideFormat.IsChecked -and $_.Issue -eq 'Formatting differs') })
     $ui.dgNames.ItemsSource = $rows
     $canFix = @($rows | Where-Object { $_.Proposed }).Count
@@ -3567,13 +3659,13 @@ function Start-NamesCheck {
         param($res, $err)
         if ($err) { Set-Status "Name check: $err" }
         $script:NameRows = @($res | Where-Object { $_ })
-        Refresh-NamesGrid
+        Update-NamesGrid
         Set-Status 'Name check done.'
     } 'info' | Out-Null
 }
 
 # ---------- duplicates ----------
-function Refresh-Dupes {
+function Update-DupesPage {
     $d = @(Get-Duplicates $script:Lib)
     $ui.dgDupes.ItemsSource = $d
     $eps = @($d | ForEach-Object { "$($_.Show)|$($_.Ep)" } | Sort-Object -Unique).Count
@@ -3639,7 +3731,7 @@ function Show-ShowPicker([string]$Heading, [string]$Query, [string]$OkText = 'Us
     return $script:PickerResult
 }
 
-function Fix-Match($show) {
+function Repair-ShowMatch($show) {
     $r = Show-ShowPicker "Which show is the folder '$($show.Folder)'?" $show.Name
     if (-not $r) { return }
     $script:MatchMap[$show.Folder] = [pscustomobject]@{ Id = [int]$r.Id; How = 'manual'; Tvdb = [int]$r.Tvdb }
@@ -3648,7 +3740,7 @@ function Fix-Match($show) {
         param($res, $err, $folder)
         $script:Index = Import-SeriesIndex; $script:PeopleDirty = $true
         $script:BitmapCache = @{}
-        Refresh-Library
+        Update-LibraryView
         if ($script:CurrentShow -and $script:CurrentShow.Folder -eq $folder) { Open-Show $folder }
         if ($err) { Set-Status "Show info: $err" }
     } 'info' $show.Folder | Out-Null
@@ -3672,13 +3764,13 @@ function Update-SearchBox {
 }
 $ui.txtSearch.Add_TextChanged({
     if ($ui.tabMain.SelectedItem -ne $ui.tLibrary -and $ui.txtSearch.Text) { $ui.tabMain.SelectedItem = $ui.tLibrary }
-    Refresh-Library
+    Update-LibraryView
     Update-SearchBox
 })
 $ui.txtSearch.Add_GotKeyboardFocus({ Update-SearchBox })
 $ui.txtSearch.Add_LostKeyboardFocus({ Update-SearchBox })
 $ui.txtSearch.Add_PreviewKeyDown({
-    param($sender, $e)
+    param($eventSource, $e)
     if ($e.Key -eq 'Escape') { if ($ui.txtSearch.Text) { $ui.txtSearch.Clear() } else { [void]$ui.svShows.Focus() }; $e.Handled = $true }
     elseif ($e.Key -eq 'Return') {
         $first = @($ui.icShows.ItemsSource | Select-Object -First 1)
@@ -3691,14 +3783,14 @@ $ui.btnSearchClear.Add_Click({ $ui.txtSearch.Clear(); [void]$ui.txtSearch.Focus(
 $ui.btnScan.Add_Click({ Start-Scan })
 $ui.btnCalIcs.Add_Click({ Export-CalendarIcs })
 $ui.icHeadStats.AddHandler([Windows.Controls.Primitives.ButtonBase]::ClickEvent, [Windows.RoutedEventHandler]{
-    param($sender, $e)
+    param($eventSource, $e)
     $b = $e.OriginalSource; if ($b -isnot [Windows.Controls.Button] -or -not $b.Tag) { return }
     $tab = $ui[[string]$b.Tag]; if ($tab) { $ui.tabMain.SelectedItem = $tab }
 })
 $ui.btnViewPosters.Add_Click({ Set-LibView 'posters' })
 $ui.btnViewList.Add_Click({ Set-LibView 'list' })
 $script:LibSortKey = ''; $script:LibSortDesc = $false
-function Sort-LibList([string]$key, [bool]$desc) {
+function Set-LibListSort([string]$key, [bool]$desc) {
     $items = $ui.dgLibList.ItemsSource
     if (-not $key -or -not $items) { return }
     $sorted = @($items | Sort-Object -Property @{ Expression = { $_.$key }; Descending = $desc }, @{ Expression = { $_.SortName }; Descending = $false })
@@ -3708,31 +3800,31 @@ function Sort-LibList([string]$key, [bool]$desc) {
     }
 }
 $ui.dgLibList.AddHandler([Windows.Controls.Primitives.ButtonBase]::ClickEvent, [Windows.RoutedEventHandler]{
-    param($sender, $e)
+    param($eventSource, $e)
     $h = $e.OriginalSource
     if ($h -isnot [Windows.Controls.Primitives.DataGridColumnHeader] -or -not $h.Column) { return }
     $key = $h.Column.SortMemberPath; if (-not $key) { return }
     # first click: biggest/newest first for numbers and dates, A-Z for text
     if ($script:LibSortKey -eq $key) { $script:LibSortDesc = -not $script:LibSortDesc } else { $script:LibSortKey = $key; $script:LibSortDesc = ($key -in @('Size', 'Eps', 'SeasonsN', 'Newest', 'NewCount')) }
-    Sort-LibList $script:LibSortKey $script:LibSortDesc
+    Set-LibListSort $script:LibSortKey $script:LibSortDesc
     $e.Handled = $true
 })
-$ui.dgLibList.Add_Sorting({ param($sender, $e) $e.Handled = $true })
+$ui.dgLibList.Add_Sorting({ param($eventSource, $e) $e.Handled = $true })
 $ui.dgLibList.Add_SelectionChanged({ $r = $ui.dgLibList.SelectedItem; if ($r) { Open-Show $r.Folder } })
 Set-LibView $(if ("$($TVT.Settings.LibView)" -eq 'list') { 'list' } else { 'posters' })
-$ui.cmbLibFilter.Add_SelectionChanged({ $TVT.Settings.LibFilter = $ui.cmbLibFilter.SelectedIndex; Refresh-Library })
-$ui.cmbLibSort.Add_SelectionChanged({ $TVT.Settings.LibSort = $ui.cmbLibSort.SelectedIndex; Refresh-Library })
+$ui.cmbLibFilter.Add_SelectionChanged({ $TVT.Settings.LibFilter = $ui.cmbLibFilter.SelectedIndex; Update-LibraryView })
+$ui.cmbLibSort.Add_SelectionChanged({ $TVT.Settings.LibSort = $ui.cmbLibSort.SelectedIndex; Update-LibraryView })
 $ui.icShows.AddHandler([Windows.Controls.Primitives.ButtonBase]::ClickEvent, [Windows.RoutedEventHandler]{
-    param($sender, $e)
+    param($eventSource, $e)
     $b = $e.OriginalSource
     if ($b -and $b.Tag) { Open-Show ([string]$b.Tag) }
 })
 $ui.btnCloseDetail.Add_Click({ Close-Show })
-$ui.lbSeasons.Add_SelectionChanged({ Fill-Episodes })
+$ui.lbSeasons.Add_SelectionChanged({ Update-EpisodeList })
 $ui.dgEpisodes.Add_SelectionChanged({ $r = $ui.dgEpisodes.SelectedItem; if ($r) { $ui.txtEpOverview.Text = $r.Overview } })
-$ui.dgEpisodes.Add_MouseDoubleClick({ $r = $ui.dgEpisodes.SelectedItem; if ($r -and $r.Path) { Play-File $script:CurrentShow $r.S $r.E $r.Path; Refresh-ShowViews } })
+$ui.dgEpisodes.Add_MouseDoubleClick({ $r = $ui.dgEpisodes.SelectedItem; if ($r -and $r.Path) { Start-EpisodeFile $r.Path; Update-ShowViews } })
 $ui.btnShowFolder.Add_Click({ if ($script:CurrentShow) { Open-InExplorer $script:CurrentShow.Path } })
-$ui.btnShowMatch.Add_Click({ if ($script:CurrentShow) { Fix-Match $script:CurrentShow } })
+$ui.btnShowMatch.Add_Click({ if ($script:CurrentShow) { Repair-ShowMatch $script:CurrentShow } })
 $ui.btnShowConfirm.Add_Click({
     $show = $script:CurrentShow; if (-not $show) { return }
     $m = $script:MatchMap[$show.Folder]; if (-not $m) { return }
@@ -3740,54 +3832,54 @@ $ui.btnShowConfirm.Add_Click({
     Save-Matches $script:MatchMap
     Set-Status "Match confirmed for $($show.Folder)."
     Open-Show $show.Folder -Keep
-    Refresh-Library
+    Update-LibraryView
 })
 $ui.btnShowRefresh.Add_Click({
     $show = $script:CurrentShow; if (-not $show) { return }
-    $id = Get-ShowInfoId $show; if ($id -le 0) { Fix-Match $show; return }
+    $id = Get-ShowInfoId $show; if ($id -le 0) { Repair-ShowMatch $show; return }
     Start-Work 'Refreshing show info' { param($id) Get-SeriesInfo $id -Force | Out-Null } @($id) {
         param($res, $err, $folder)
         $script:BitmapCache = @{}
         $script:Index = Import-SeriesIndex; $script:PeopleDirty = $true
         if ($err) { Set-Status "Show info: $err" } else { Set-Status 'Show info refreshed.' }
         if ($script:CurrentShow -and $script:CurrentShow.Folder -eq $folder) { Open-Show $folder }
-        Refresh-Library
+        Update-LibraryView
     } 'info' $show.Folder | Out-Null
 })
-$ui.btnEpPlay.Add_Click({ $r = $ui.dgEpisodes.SelectedItem; if ($r -and $r.Path) { Play-File $script:CurrentShow $r.S $r.E $r.Path; Refresh-ShowViews } elseif ($r) { Show-Msg "That episode isn't on disk." } })
+$ui.btnEpPlay.Add_Click({ $r = $ui.dgEpisodes.SelectedItem; if ($r -and $r.Path) { Start-EpisodeFile $r.Path; Update-ShowViews } elseif ($r) { Show-Msg "That episode isn't on disk." } })
 $ui.btnEpOpen.Add_Click({ $r = $ui.dgEpisodes.SelectedItem; if ($r -and $r.Path) { Open-InExplorer $r.Path } elseif ($script:CurrentShow) { Open-InExplorer $script:CurrentShow.Path } })
 
 # ---------- events: new page ----------
-$ui.cmbNewRange.Add_SelectionChanged({ Refresh-NewPage })
-$ui.btnNewPlay.Add_Click({ $r = $ui.dgNew.SelectedItem; if ($r) { Play-File $script:Lib[$r.Folder] $r.S $r.E $r.Path; Refresh-ShowViews } })
-$ui.dgNew.Add_MouseDoubleClick({ $r = $ui.dgNew.SelectedItem; if ($r) { Play-File $script:Lib[$r.Folder] $r.S $r.E $r.Path; Refresh-ShowViews } })
+$ui.cmbNewRange.Add_SelectionChanged({ Update-NewPage })
+$ui.btnNewPlay.Add_Click({ $r = $ui.dgNew.SelectedItem; if ($r) { Start-EpisodeFile $r.Path; Update-ShowViews } })
+$ui.dgNew.Add_MouseDoubleClick({ $r = $ui.dgNew.SelectedItem; if ($r) { Start-EpisodeFile $r.Path; Update-ShowViews } })
 $ui.btnNewDismiss.Add_Click({
     $rows = @($ui.dgNew.SelectedItems); if (-not $rows) { Show-Msg 'Select one or more episodes first.'; return }
     foreach ($r in $rows) { $script:Dismissed["$($r.Folder)|$($r.S)|$($r.E)"] = $true }
     Save-Dismissed
-    Refresh-ShowViews
+    Update-ShowViews
 })
 $ui.btnNewGo.Add_Click({ $r = $ui.dgNew.SelectedItem; if ($r) { $ui.tabMain.SelectedItem = $ui.tLibrary; Open-Show $r.Folder } })
 $ui.btnNewOpen.Add_Click({ $r = $ui.dgNew.SelectedItem; if ($r) { Open-InExplorer $r.Path } })
 
 # ---------- events: stats / about ----------
-$ui.btnStatsRefresh.Add_Click({ Refresh-Stats })
+$ui.btnStatsRefresh.Add_Click({ Update-StatsPage })
 $Win.AddHandler([Windows.Documents.Hyperlink]::RequestNavigateEvent, [Windows.Navigation.RequestNavigateEventHandler]{
-    param($sender, $e)
+    param($eventSource, $e)
     $u = "$($e.Uri)"
-    if ($u -match '^https://') { try { Start-Process $u } catch {} }
+    if ($u -match '^https://') { try { Start-Process $u } catch { Write-Verbose $_.Exception.Message } }
     $e.Handled = $true
 })
 
 # ---------- events: calendar ----------
-$ui.btnCalPrev.Add_Click({ $script:CalOffset--; Refresh-CalendarView })
-$ui.btnCalNext.Add_Click({ $script:CalOffset++; Refresh-CalendarView })
-$ui.btnCalToday.Add_Click({ $script:CalOffset = 0; Refresh-CalendarView })
+$ui.btnCalPrev.Add_Click({ $script:CalOffset--; Update-CalendarView })
+$ui.btnCalNext.Add_Click({ $script:CalOffset++; Update-CalendarView })
+$ui.btnCalToday.Add_Click({ $script:CalOffset = 0; Update-CalendarView })
 $ui.btnCalRefresh.Add_Click({ Start-CalendarLoad -Refresh })
-$ui.chkCalHideHave.Add_Click({ Refresh-CalendarView })
+$ui.chkCalHideHave.Add_Click({ Update-CalendarView })
 foreach ($ic in @($ui.icCalendar, $ui.icCalMissed)) {
     $ic.AddHandler([Windows.Controls.Primitives.ButtonBase]::ClickEvent, [Windows.RoutedEventHandler]{
-        param($sender, $e)
+        param($eventSource, $e)
         $b = $e.OriginalSource
         if ($b -and $b.Tag -and $script:Lib.Contains([string]$b.Tag)) { $ui.tabMain.SelectedItem = $ui.tLibrary; Open-Show ([string]$b.Tag) }
     })
@@ -3795,7 +3887,7 @@ foreach ($ic in @($ui.icCalendar, $ui.icCalMissed)) {
 
 # ---------- events: cast ----------
 $ui.icCast.AddHandler([Windows.Controls.Primitives.ButtonBase]::ClickEvent, [Windows.RoutedEventHandler]{
-    param($sender, $e)
+    param($eventSource, $e)
     $b = $e.OriginalSource
     if ($b -and $b.Tag) {
         $it = $b.DataContext
@@ -3804,12 +3896,12 @@ $ui.icCast.AddHandler([Windows.Controls.Primitives.ButtonBase]::ClickEvent, [Win
     }
 })
 $ui.icPeople.AddHandler([Windows.Controls.Primitives.ButtonBase]::ClickEvent, [Windows.RoutedEventHandler]{
-    param($sender, $e)
+    param($eventSource, $e)
     $b = $e.OriginalSource
     if ($b -and $b.Tag) { Open-Person ([string]$b.Tag) $null "$($b.DataContext.Name)" }
 })
 $ui.icPersonShows.AddHandler([Windows.Controls.Primitives.ButtonBase]::ClickEvent, [Windows.RoutedEventHandler]{
-    param($sender, $e)
+    param($eventSource, $e)
     $b = $e.OriginalSource
     if ($b -and $b.Tag) { $ui.tabMain.SelectedItem = $ui.tLibrary; Open-Show ([string]$b.Tag) }
 })
@@ -3827,9 +3919,9 @@ $ui.btnPersonBioMore.Add_Click({
     else { $ui.svPersonBio.MaxHeight = 96; $ui.svPersonBio.VerticalScrollBarVisibility = 'Disabled'; $ui.svPersonBio.ScrollToTop(); $ui.btnPersonBioMore.Content = 'Show more' }
 })
 $ui.dgCredits.Add_MouseDoubleClick({ $r = $ui.dgCredits.SelectedItem; if ($r -and "$($r.Url)" -match '^https://www\.tvmaze\.com/') { Start-Process $r.Url } })
-$ui.txtCastSearch.Add_TextChanged({ $ui.txtCastSearchHint.Visibility = $(if ($ui.txtCastSearch.Text) { 'Collapsed' } else { 'Visible' }); Refresh-CastWall })
-$ui.cmbCastFilter.Add_SelectionChanged({ Refresh-CastWall })
-$ui.cmbCastSort.Add_SelectionChanged({ Refresh-CastWall })
+$ui.txtCastSearch.Add_TextChanged({ $ui.txtCastSearchHint.Visibility = $(if ($ui.txtCastSearch.Text) { 'Collapsed' } else { 'Visible' }); Update-CastWall })
+$ui.cmbCastFilter.Add_SelectionChanged({ Update-CastWall })
+$ui.cmbCastSort.Add_SelectionChanged({ Update-CastWall })
 
 # ---------- events: coming / missing / names / dupes ----------
 
@@ -3837,16 +3929,16 @@ $ui.chkMissOwned.IsChecked = [bool]$TVT.Settings.MissOwned
 $ui.chkMissSpecials.IsChecked = [bool]$TVT.Settings.MissSpecials
 $ui.chkMissContinuing.IsChecked = [bool]$TVT.Settings.MissContinuing
 $ui.btnMissRun.Add_Click({ Start-MissingCheck })
-$ui.txtMissFilter.Add_TextChanged({ $ui.txtMissFilterHint.Visibility = $(if ($ui.txtMissFilter.Text) { 'Collapsed' } else { 'Visible' }); Refresh-MissingGrid })
+$ui.txtMissFilter.Add_TextChanged({ $ui.txtMissFilterHint.Visibility = $(if ($ui.txtMissFilter.Text) { 'Collapsed' } else { 'Visible' }); Update-MissingGrid })
 $ui.btnMissGo.Add_Click({ $r = $ui.dgMissing.SelectedItem; if ($r) { $ui.tabMain.SelectedItem = $ui.tLibrary; Open-Show $r.Folder } })
 $ui.dgMissing.Add_MouseDoubleClick({ $r = $ui.dgMissing.SelectedItem; if ($r) { $ui.tabMain.SelectedItem = $ui.tLibrary; Open-Show $r.Folder } })
 $ui.btnMissIgnore.Add_Click({
     $r = $ui.dgMissing.SelectedItem; if (-not $r) { return }
-    if (-not (Confirm-Action "Leave '$($r.Show)' out of missing-episode checks from now on?`n`n(You can undo this by removing it from IgnoreMissing in Data\settings.json.)")) { return }
+    if (-not (Confirm-Action "Leave '$($r.Show)' out of missing-episode checks from now on?`n`n(You can undo this by removing it from IgnoreMissing in settings.json in the data folder.)")) { return }
     $TVT.Settings.IgnoreMissing = @($TVT.Settings.IgnoreMissing) + $r.Folder
     Save-Settings
     $script:MissingRows = @($script:MissingRows | Where-Object { $_.Folder -ne $r.Folder })
-    Refresh-MissingGrid
+    Update-MissingGrid
 })
 $ui.btnMissExport.Add_Click({
     if (-not $script:MissingRows) { Show-Msg 'Run a check first.'; return }
@@ -3859,7 +3951,7 @@ $ui.btnMissExport.Add_Click({
 })
 
 $ui.btnNamesRun.Add_Click({ Start-NamesCheck })
-$ui.chkNamesHideFormat.Add_Click({ Refresh-NamesGrid })
+$ui.chkNamesHideFormat.Add_Click({ Update-NamesGrid })
 $ui.btnNamesOpen.Add_Click({ $r = $ui.dgNames.SelectedItem; if ($r) { Open-InExplorer $r.Path } })
 $ui.btnNamesApply.Add_Click({
     $rows = @($ui.dgNames.SelectedItems | Where-Object { $_.Proposed })
@@ -3882,7 +3974,7 @@ $ui.btnNamesApply.Add_Click({
     Show-Msg $msg
     $paths = @{}; foreach ($r in $rows) { $paths[$r.Path] = $true }
     $script:NameRows = @($script:NameRows | Where-Object { -not $paths[$_.Path] })
-    Refresh-NamesGrid
+    Update-NamesGrid
     Start-Scan
 })
 $ui.btnNamesUndo.Add_Click({
@@ -3915,9 +4007,9 @@ $ui.btnDupesMove.Add_Click({
 
 # ---------- events: problem files ----------
 $ui.btnProbRun.Add_Click({ Start-ProblemCheck })
-$ui.cmbProbType.Add_SelectionChanged({ Refresh-ProblemGrid })
+$ui.cmbProbType.Add_SelectionChanged({ Update-ProblemGrid })
 $ui.btnProbOpen.Add_Click({ $r = $ui.dgProblems.SelectedItem; if ($r) { Open-InExplorer $r.Path } })
-$ui.btnProbPlay.Add_Click({ $r = $ui.dgProblems.SelectedItem; if ($r -and $r.Kind -eq 'file' -and $script:VideoExt -contains [IO.Path]::GetExtension($r.Path).ToLowerInvariant()) { try { Start-Process -FilePath $r.Path } catch {} } })
+$ui.btnProbPlay.Add_Click({ $r = $ui.dgProblems.SelectedItem; if ($r -and $r.Kind -eq 'file' -and $script:VideoExt -contains [IO.Path]::GetExtension($r.Path).ToLowerInvariant()) { try { Start-Process -FilePath $r.Path } catch { Write-Verbose $_.Exception.Message } } })
 $ui.dgProblems.Add_MouseDoubleClick({ $r = $ui.dgProblems.SelectedItem; if ($r) { Open-InExplorer $r.Path } })
 $ui.btnProbHold.Add_Click({
     $rows = @($ui.dgProblems.SelectedItems | Where-Object { $_.Kind -eq 'file' })
@@ -3953,7 +4045,7 @@ $ui.btnProbEmpty.Add_Click({
     if (-not (Confirm-Action "Remove $($rows.Count) empty folder(s)? Only folders that are still completely empty are removed.")) { return }
     $n = 0
     foreach ($r in ($rows | Sort-Object { $_.Path.Length } -Descending)) {
-        try { if ((Test-Path -LiteralPath $r.Path) -and @([IO.Directory]::GetFileSystemEntries($r.Path)).Count -eq 0) { [IO.Directory]::Delete($r.Path); $n++ } } catch {}
+        try { if ((Test-Path -LiteralPath $r.Path) -and @([IO.Directory]::GetFileSystemEntries($r.Path)).Count -eq 0) { [IO.Directory]::Delete($r.Path); $n++ } } catch { Write-Verbose $_.Exception.Message }
     }
     Set-Status "Removed $n empty folder(s)."
     Start-ProblemCheck
@@ -3982,15 +4074,14 @@ function Import-DataZip([string]$zipPath) {
     Remove-Item -LiteralPath $tmp -Recurse -Force
     return $n
 }
-function Reload-All {
-    Load-Settings
-    Fill-SettingsForm
+function Import-SavedData {
+    Import-Settings
+    Set-SettingsForm
     $script:MatchMap = Import-Matches
-        $script:Dismissed = @{}
+    $script:Dismissed = @{}
     foreach ($kv in (Read-TsvMap (Join-Path $DataDir 'new-dismissed.tsv')).GetEnumerator()) { $script:Dismissed[$kv.Key] = $true }
     $script:Index = Import-SeriesIndex; $script:PeopleDirty = $true
-    $script:TvdbAuth = $null
-    Refresh-Library
+    Update-LibraryView
 }
 function Update-BackupInfo {
     $last = Get-ChildItem -LiteralPath (Join-Path $DataDir 'Backups') -Filter '*.zip' -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
@@ -4002,7 +4093,7 @@ $ui.btnRestore.Add_Click({
     $dlg.Filter = 'TV Toolkit backup (*.zip)|*.zip'; $dlg.InitialDirectory = (Join-Path $DataDir 'Backups')
     if (-not $dlg.ShowDialog($Win)) { return }
     if (-not (Confirm-Action "Restore from $([IO.Path]::GetFileName($dlg.FileName))?`n`nYour current settings and matches will be replaced. A backup of them is made first.")) { return }
-    try { New-Backup '-before-restore' | Out-Null; $n = Import-DataZip $dlg.FileName; Reload-All; Update-BackupInfo; Show-Msg "Restored $n file(s)." } catch { Show-Msg "Restore failed:`n$($_.Exception.Message)" 'TV Toolkit' 'Warning' }
+    try { New-Backup '-before-restore' | Out-Null; $n = Import-DataZip $dlg.FileName; Import-SavedData; Update-BackupInfo; Show-Msg "Restored $n file(s)." } catch { Show-Msg "Restore failed:`n$($_.Exception.Message)" 'TV Toolkit' 'Warning' }
 })
 $ui.btnExportSettings.Add_Click({
     $dlg = New-Object Microsoft.Win32.SaveFileDialog
@@ -4020,7 +4111,7 @@ $ui.btnImportSettings.Add_Click({
     $dlg.Filter = 'TV Toolkit settings (*.zip)|*.zip'
     if (-not $dlg.ShowDialog($Win)) { return }
     if (-not (Confirm-Action "Import settings and matches from this file? What's here now is backed up first.")) { return }
-    try { New-Backup '-before-import' | Out-Null; Import-DataZip $dlg.FileName | Out-Null; Reload-All; Show-Msg 'Imported. Rescanning the library now.'; Start-Scan } catch { Show-Msg "Import failed:`n$($_.Exception.Message)" 'TV Toolkit' 'Warning' }
+    try { New-Backup '-before-import' | Out-Null; Import-DataZip $dlg.FileName | Out-Null; Import-SavedData; Show-Msg 'Imported. Rescanning the library now.'; Start-Scan } catch { Show-Msg "Import failed:`n$($_.Exception.Message)" 'TV Toolkit' 'Warning' }
 })
 $ui.btnPrintList.Add_Click({
     if ($script:Lib.Count -eq 0) { Show-Msg 'Scan your library first.'; return }
@@ -4042,12 +4133,12 @@ $ui.btnClearImages.Add_Click({
     $script:BackdropAsked = @{}; $script:ThumbAsked = @{}
     $script:CastPhotosAsked = @{}
     $script:BitmapCache = @{}
-    Refresh-Library
+    Update-LibraryView
     Start-MatchJob
 })
 
 # ---------- events: settings ----------
-function Fill-SettingsForm {
+function Set-SettingsForm {
     $s = $TVT.Settings
     $ui.txtRoots.Text = (@($s.Roots) -join "`r`n")
     $ui.txtHold.Text = "$($s.HoldFolder)"
@@ -4067,13 +4158,13 @@ $ui.btnSaveSettings.Add_Click({
     $rootsChanged = Read-SettingsForm
     Save-Settings
     $ui.txtSettingsSaved.Text = "Saved at $(Get-Date -Format 'HH:mm')"
-    Refresh-Library
+    Update-LibraryView
     Update-NewTabHeader
     if ($rootsChanged -and (Confirm-Action 'Your TV folders changed. Rescan now?')) { Start-Scan }
 })
-$ui.btnTestTvdb.Add_Click({
+$ui.btnTestMaze.Add_Click({
     Read-SettingsForm | Out-Null
-    $ui.txtTvdbTest.Text = 'Testing...'
+    $ui.txtMazeTest.Text = 'Testing...'
     Start-Work 'Testing TVmaze' {
         $r = @(Search-Shows 'Doctor Who')
         $first = ''; if ($r.Count) { $first = " (first: $($r[0].Name) $($r[0].Year))" }
@@ -4081,168 +4172,57 @@ $ui.btnTestTvdb.Add_Click({
         "Connected to TVmaze. Test search for Doctor Who found $($r.Count) show(s)$first"
     } @() {
         param($res, $err)
-        if ($err) { $ui.txtTvdbTest.Text = "Failed: $err" } else { $ui.txtTvdbTest.Text = "$($res[0])" }
+        if ($err) { $ui.txtMazeTest.Text = "Failed: $err" } else { $ui.txtMazeTest.Text = "$($res[0])" }
     } | Out-Null
 })
 
 # ---------- tab switching ----------
 $ui.tabMain.Add_SelectionChanged({
-    param($sender, $e)
+    param($eventSource, $e)
     if ($e.OriginalSource -ne $ui.tabMain) { return }
     $t = $ui.tabMain.SelectedItem
-    if ($t -eq $ui.tNew) { Refresh-NewPage }
-    elseif ($t -eq $ui.tCast) { if (-not $script:SkipCastRefresh) { Refresh-CastPage } }
-    elseif ($t -eq $ui.tStats) { Refresh-Stats }
-    elseif ($t -eq $ui.tProblems) { if (-not $script:ProblemsChecked) { Refresh-ProblemGrid; Start-ProblemCheck } }
-    elseif ($t -eq $ui.tCalendar) { Refresh-CalendarView; if (-not $script:CalLoaded -or $script:CalDirty) { $script:CalDirty = $false; Start-CalendarLoad } }
-    elseif ($t -eq $ui.tDupes) { Refresh-Dupes }
+    if ($t -eq $ui.tNew) { Update-NewPage }
+    elseif ($t -eq $ui.tCast) { if (-not $script:SkipCastRefresh) { Update-CastPage } }
+    elseif ($t -eq $ui.tStats) { Update-StatsPage }
+    elseif ($t -eq $ui.tProblems) { if (-not $script:ProblemsChecked) { Update-ProblemGrid; Start-ProblemCheck } }
+    elseif ($t -eq $ui.tCalendar) { Update-CalendarView; if (-not $script:CalLoaded -or $script:CalDirty) { $script:CalDirty = $false; Start-CalendarLoad } }
+    elseif ($t -eq $ui.tDupes) { Update-DupesPage }
     elseif ($t -eq $ui.tMissing) { if (-not $script:MissingChecked -and -not $script:BusyGroups['info'] -and $script:Lib.Count) { $script:MissingChecked = $true; Start-MissingCheck } }
     elseif ($t -eq $ui.tUtils) { Update-BackupInfo }
 })
 
 # ---------- keyboard ----------
 $Win.Add_PreviewKeyDown({
-    param($sender, $e)
+    param($eventSource, $e)
     if ($e.Key -eq 'F5') { Start-Scan; $e.Handled = $true }
     elseif ($e.Key -eq 'F' -and [Windows.Input.Keyboard]::Modifiers -eq 'Control') { $ui.txtSearch.Focus() | Out-Null; $ui.txtSearch.SelectAll(); $e.Handled = $true }
     elseif ($e.Key -eq 'Escape' -and -not $ui.txtSearch.IsKeyboardFocused -and $ui.tabMain.SelectedItem -eq $ui.tLibrary -and $script:CurrentShow) { Close-Show; $e.Handled = $true }
 })
 
 # ---------- about ----------
-$ui.txtAboutVersion.Text = "Version $AppVersion  $DOT  PowerShell $($PSVersionTable.PSVersion)"
+$ui.txtAboutVersion.Text = "v$AppVersion  $DOT  $Copyright  $DOT  MIT licence  $DOT  PowerShell $($PSVersionTable.PSVersion)"
 $ui.txtHeaderVersion.Text = "v$AppVersion"
-$Win.Title = "TV Toolkit v$AppVersion"
+$Win.Title = "$AppName v$AppVersion"
 $ui.txtAboutNew.Text = @"
-1.9.1
-$DOT  TV Toolkit can be built as a Windows program (TV Toolkit.exe) with Build-Exe.ps1, and has its own TV icon on the window and taskbar.
-
-1.9.0
-$DOT  'Since you last opened it' card: when you open TV Toolkit it lists episodes that arrived, shows that came back on TV and episodes that aired that you don't have, with buttons to the New, Missing and Calendar pages.
-$DOT  Season complete: a green tick on a poster when you have every aired episode of the show's latest season, a tick on complete season chips, and a Latest season column in the list view.
-$DOT  Calendar: Save to my calendar (.ics) exports the next 3 months of your shows' episodes (UK times, channel, length) for Outlook, Google Calendar or your phone.
-$DOT  Library: type a letter to jump to the first show starting with it; type it again for the next one, Enter to open.
-$DOT  Missing episodes now checks itself the first time you open the page. About page description brought up to date.
-
-1.8.2
-$DOT  Top bar: shows, episodes, space used and free space as tidy figures (free space turns amber or red as the drive fills), a green count of new episodes, and when the library was last scanned on a quieter Rescan button. Click any figure to jump to its page.
-
-1.8.1
-$DOT  Shows with no episodes yet now say when they start or come back (e.g. 'Back 25 Nov 2026') instead of 'Waiting for episodes', when TVmaze knows the date. Ended shows no longer say they're waiting.
-$DOT  Library list: click a column heading to sort, click again to reverse.
-
-1.8.0
-$DOT  Stats: a tile for each TV drive showing free space, a used/free bar (amber over 75%, red over 90%) and roughly when it'll be full at the rate episodes have been arriving.
-$DOT  New Problem files page: tiny or unreadable episodes, unfinished downloads, sample files, episodes not in a season folder, junk files, subtitles or .nfo files with no episode, and empty folders. Move files to the holding folder, move loose episodes into the right season folder, or remove empty folders.
-$DOT  Show panel: the show's backdrop picture fades in behind the top of the panel.
-$DOT  Episode pictures: each episode has a still in the episode list and on the New page.
-$DOT  Library list view: switch between Posters and a sortable List (channel, status, seasons, episodes, size, quality, newest episode, new, next airing). Your choice is remembered.
-
-1.7.1
-$DOT  Tidy-up: removed leftover code from the watched and Medusa features and unused settings. Old settings (Medusa address/key, TheTVDB keys) are cleared from settings.json the next time settings are saved.
-
-1.7.0
-$DOT  Medusa removed: no Medusa page, settings, Add to Medusa, search or pick-a-copy buttons. TV Toolkit now just looks after your library.
-
-1.6.2
-$DOT  About page: What's new moved into its own panel on the right.
-
-1.6.1
-$DOT  Space used is shown as a whole number of GB (header, Stats tile and Biggest shows).
-
-1.6.0
-$DOT  Watched tracking removed: no Next up page, no watched buttons, ticks, progress bars or watched stats. 'New' now simply means episodes that arrived recently.
-$DOT  Stats bar charts give names more room.
-
-1.5.1
-$DOT  Picture quality is now read from inside the video files (resolution and length), so it works without 1080p etc. in the file names. Uses Windows' own video details, with ffprobe as a backup if it's installed. New and changed files are read automatically in the background.
-$DOT  Episode lists have a Quality column, Duplicates & quality uses the real resolution, and Stats' viewing time uses real file lengths.
-$DOT  Utilities: 'Re-read video details'.
-
-1.5.0
-$DOT  New Stats page: shows, episodes, space used, viewing time, how much you've watched, new this week and more - plus charts of episodes added and watched per month, channels, genres, biggest shows, most episodes, picture quality and most watched. Hover any bar for the exact figure.
-$DOT  About page now has a Credits section (TVmaze, TheTVDB, Medusa and more) with links.
-
-1.4.3
-$DOT  Redesigned search box: rounded, with a search icon, centred text, a highlighted border while typing, a match count, a clear button and a Ctrl+F hint.
-$DOT  Search now also matches channels, genres, status and year (try 'BBC', 'Comedy' or 'Ended'). Esc clears it; Enter opens the show when there's only one match.
-
-1.4.2
-$DOT  Cast members now show their biography (from their TVmaze page) with Show more / Show less, and any other names they're known by.
-
-1.4.1
-$DOT  Coming up page removed - the Calendar covers it. The 'NEW TUE' style badges on the poster wall still show when a new episode airs this week.
-
-1.4.0
-$DOT  New Calendar page, like Medusa's schedule: the next 7 days as columns, starting today, with every episode airing from your shows - poster, episode and title, UK air time, channel and running time.
-$DOT  Each episode is tagged ON DISK, WATCHED, TODAY, UPCOMING or MISSING. Today's column is highlighted.
-$DOT  'Missed in the last 7 days' strip lists aired episodes that aren't on disk - click one to open the show, or send them all to Medusa in one go.
-$DOT  Previous / This / Next week buttons, 'Only shows I'm watching' and 'Hide episodes already on disk'. Click any episode to jump to its show.
-$DOT  Air times are now saved with each episode and shown in your local time.
-
-1.3.0
-$DOT  New Cast page: everyone who appears in your shows, as a wall of faces. Search by name or character, show only people in 2+ of your shows or the main cast, and sort by most shows or name.
-$DOT  Click anyone - on the Cast page or the cast row of a show - to see their photo, birthday and age, country, which of your shows they're in (click to jump there) and the rest of their TV work.
-$DOT  'Back to show' takes you straight back to the show you came from.
-
-1.2.4
-$DOT  Cast photos are framed on the face (cropped from the top) instead of the middle, so heads aren't cut off.
-
-1.2.3
-$DOT  Cast photos now actually show (they were downloading fine but weren't being displayed).
-$DOT  Start TV Toolkit.cmd logs each launch to Data\Logs\launch.log, and shows an error box if TV Toolkit can't start.
-
-1.2.2
-$DOT  A small TV Toolkit splash appears straight away while it starts, so you know it's on its way.
-$DOT  Only one copy runs at a time - opening it again just brings the existing window to the front.
-$DOT  The window now comes to the front when it opens, instead of sometimes hiding behind other windows.
-$DOT  Each start is recorded in Data\Logs\startup.log to help track down any slow or failed starts.
-
-1.2.1
-$DOT  Cast now shows each person's photo (it was downloading but only the initials were showing).
-
-1.2.0
-$DOT  New page: every episode that arrived recently and you haven't watched, newest first - play, mark watched, or 'Not new' to hide it. The tab shows how many are waiting.
-$DOT  Poster wall: green 'N NEW' badge on shows with new unwatched episodes, and '5 unwatched of 13' under shows you've started.
-$DOT  Episode list: new episodes are highlighted with a green NEW tag, watched ones ticked, unwatched ones on disk get a dot. Season chips show how many are new.
-$DOT  Library filters 'Has new episodes' and 'Has unwatched episodes', and a 'Most new episodes' sort.
-$DOT  Settings: choose how many days an episode counts as new (default 14). 'New' uses the date the file arrived on the drive.
-
-1.1.2
-$DOT  Version number shown in the header and the window title.
-
-1.1.1
-$DOT  Confirm match button: tick off a best-guess match without re-searching.
-$DOT  New 'Waiting for episodes' library filter for show folders with nothing in them yet.
-$DOT  Extras folders (backdrops, extras, trailers, featurettes...) and theme music are ignored when scanning.
-$DOT  'Special 13'-style files in S00/Specials are read as specials (0x13).
-
-1.1.0
-$DOT  Show info, posters, cast and episode lists now come from TVmaze - free, no API key needed. (TheTVDB no longer accepts legacy keys.)
-$DOT  Each show's TheTVDB id is still picked up from TVmaze, so Medusa works as before.
-$DOT  Logging moved to Data\Logs\tvinfo.log.
-
-1.0.1
-$DOT  TheTVDB problems are now logged to Data\Logs\tvdb.log, and you're told when matching fails instead of it failing silently.
-$DOT  Test TheTVDB now runs a real search as well as logging in.
-
-1.0.0  (first release)
-$DOT  Poster wall for every show on your TV drive, with filters (continuing, ended, watching, airing this week) and sorting.
-$DOT  Show page with TheTVDB info, cast photos, season chips and an episode list showing what's on disk, missing or upcoming.
-$DOT  Watched tracking per episode, 'watched up to here', season watched, and a Next up list of where you left off.
-$DOT  Missing episodes check, with options for specials, owned seasons only and continuing shows only.
-$DOT  Filename checker for 'Show - 1x01 - Title', with preview, sidecar files renamed too, and undo.
-$DOT  Duplicates and quality by show, with a holding folder instead of deleting.
-$DOT  Medusa: add shows (you choose the root folder, with a preview), search for missing episodes, or pick the exact copy yourself - English-labelled only, largest first.
-$DOT  Backups, restore, moving settings between PCs, and a printable show list.
+1.00
+$DOT  First release in the house style. Version numbers restart here; the changes from 1.0.0 to 1.9.1 are in docs\HISTORY-before-1.00.md.
+$DOT  Settings and data now live in %APPDATA%\TV Toolkit, so rebuilding or moving the app never touches them. The old Data folder is copied across the first time this version starts.
+$DOT  Rescan keeps your last scan if a TV folder can't be reached (NAS off or drive not mapped) instead of showing an empty library.
+$DOT  Moving a duplicate or problem file to the holding folder moves only that copy and its subtitles and artwork, never another copy of the episode with a different extension. Renaming works the same way.
+$DOT  New installs start with no TV folder filled in, instead of assuming T:\.
+$DOT  About shows the copyright and licence. Start TV Toolkit.cmd starts src\TV-Toolkit.ps1, and the exe is built as 'TV Toolkit v1.00.exe'.
 "@
-$ui.txtAboutData.Text = "Everything TV Toolkit keeps is in:`n$DataDir`n`nThe whole TV Toolkit folder is portable - move it anywhere and it keeps working."
+$ui.txtAboutData.Text = "Everything TV Toolkit keeps (settings, show matches, the image cache, logs and backups) is in:`n$DataDir`n`nUtilities > Open data folder opens it. Nothing is stored next to the app, so rebuilding or moving it keeps your settings."
 
 # ---------- start ----------
-Fill-SettingsForm
+Set-SettingsForm
 $Win.Add_ContentRendered({
     Write-StartLog 'Main window on screen'
-    if ($Splash) { try { $Splash.Close() } catch {}; $Splash = $null }
-    try { $Win.Activate() | Out-Null; $Win.Topmost = $true; $Win.Topmost = $false } catch {}
+    if ($Splash) { try { $Splash.Close() } catch { Write-Verbose $_.Exception.Message }; $Splash = $null }
+    try { $Win.Activate() | Out-Null; $Win.Topmost = $true; $Win.Topmost = $false } catch { Write-Verbose $_.Exception.Message }
+    if ($script:MigratedFrom) {
+        Show-Msg "TV Toolkit now keeps its settings and data in:`n$DataDir`n`nYour old Data folder was copied there from:`n$($script:MigratedFrom)`n`nOnce you've checked everything looks right, you can delete the old folder."
+    }
     if (Test-Path -LiteralPath (Join-Path $DataDir 'shows.tsv')) {
         Start-LoadLibrary
         $script:AfterLoad = {
@@ -4255,14 +4235,14 @@ $Win.Add_ContentRendered({
         Start-Scan
     } else {
         $ui.spEmpty.Visibility = 'Visible'
-        $ui.txtEmpty.Text = "Couldn't reach $(@($TVT.Settings.Roots) -join ', '). Set your TV folder in Settings, then press Rescan library."
+        $ui.txtEmpty.Text = $(if (@($TVT.Settings.Roots).Count) { "Couldn't reach $(@($TVT.Settings.Roots) -join ', '). Check the drive or NAS is on, or change your TV folder in Settings, then press Rescan." } else { 'Add your TV folder in Settings (for example T:\ or \\NAS\TV), press Save settings, then Rescan.' })
         $ui.tabMain.SelectedItem = $ui.tSettings
     }
 })
 # ---------- jump by letter (Library) ----------
 $script:JumpLast = ''; $script:JumpIdx = -1
 $Win.Add_PreviewTextInput({
-    param($sender, $e)
+    param($eventSource, $e)
     if ($ui.tabMain.SelectedItem -ne $ui.tLibrary) { return }
     $f = [Windows.Input.Keyboard]::FocusedElement
     if ($f -is [Windows.Controls.Primitives.TextBoxBase] -or $f -is [Windows.Controls.ComboBox] -or $f -is [Windows.Controls.ComboBoxItem]) { return }
@@ -4282,9 +4262,9 @@ $Win.Add_PreviewTextInput({
     } else {
         $cp = $ui.icShows.ItemContainerGenerator.ContainerFromIndex($idx)
         if ($cp) {
-            $pt = [Windows.Point]::new(0, 0); try { $pt = $cp.TransformToAncestor($ui.svShows).Transform([Windows.Point]::new(0, 0)) } catch {}
+            $pt = [Windows.Point]::new(0, 0); try { $pt = $cp.TransformToAncestor($ui.svShows).Transform([Windows.Point]::new(0, 0)) } catch { Write-Verbose $_.Exception.Message }
             $ui.svShows.ScrollToVerticalOffset([math]::Max(0, $ui.svShows.VerticalOffset + $pt.Y - 8))
-            if ([Windows.Media.VisualTreeHelper]::GetChildrenCount($cp) -gt 0) { $btn = [Windows.Media.VisualTreeHelper]::GetChild($cp, 0); try { [void]$btn.Focus() } catch {} }
+            if ([Windows.Media.VisualTreeHelper]::GetChildrenCount($cp) -gt 0) { $btn = [Windows.Media.VisualTreeHelper]::GetChild($cp, 0); try { [void]$btn.Focus() } catch { Write-Verbose $_.Exception.Message } }
         }
     }
     Set-Status "$($item.Title)  ($($pos + 1) of $($hits.Count) starting with '$($ch.ToUpper())' - press it again for the next, Enter to open)"
@@ -4294,7 +4274,7 @@ $Win.Add_PreviewTextInput({
 # ---------- since you last opened it ----------
 $script:SessionPath = Join-Path $DataDir 'last-session.json'
 $script:PrevSession = $null
-try { if (Test-Path -LiteralPath $script:SessionPath) { $script:PrevSession = Get-Content -LiteralPath $script:SessionPath -Raw | ConvertFrom-Json } } catch {}
+try { if (Test-Path -LiteralPath $script:SessionPath) { $script:PrevSession = Get-Content -LiteralPath $script:SessionPath -Raw | ConvertFrom-Json } } catch { Write-Verbose $_.Exception.Message }
 $script:SinceClosed = $false
 function Get-MissingKeySet {
     # Same rules as the Missing episodes page, from saved show info only (no downloads)
@@ -4340,7 +4320,7 @@ function Update-SinceCard {
             if (-not $e -or [int]$e.E -ne 1 -or [int]$e.S -le 0) { continue }
             $lt = Get-LocalAirTime $e
             $when = $null
-            if ($lt) { $when = $lt.ToUniversalTime() } elseif ($e.Aired) { try { $when = [datetime]::ParseExact("$($e.Aired)", 'yyyy-MM-dd', $null).ToUniversalTime() } catch {} }
+            if ($lt) { $when = $lt.ToUniversalTime() } elseif ($e.Aired) { try { $when = [datetime]::ParseExact("$($e.Aired)", 'yyyy-MM-dd', $null).ToUniversalTime() } catch { Write-Verbose $_.Exception.Message } }
             if ($when -and $when -gt $prev -and $when -le $now) {
                 $back.Add($(if ([int]$e.S -eq 1) { "$($show.Folder) started" } else { "$($show.Folder) - season $($e.S) started" }) + " $($when.ToLocalTime().ToString('ddd d MMM'))")
             }
@@ -4370,23 +4350,28 @@ function Save-Session {
         $miss = @(); if ($script:Lib.Count) { $miss = @((Get-MissingKeySet).Keys) }
         $o = [ordered]@{ Time = (Get-Date).ToUniversalTime().Ticks; Missing = $miss }
         [IO.File]::WriteAllText($script:SessionPath, ($o | ConvertTo-Json -Depth 3 -Compress), [Text.Encoding]::UTF8)
-    } catch {}
+    } catch { Write-Verbose $_.Exception.Message }
 }
 $ui.btnSinceClose.Add_Click({ $script:SinceClosed = $true; $ui.bdSince.Visibility = 'Collapsed' })
 $ui.btnSinceNew.Add_Click({ $script:SinceClosed = $true; $ui.bdSince.Visibility = 'Collapsed'; $ui.tabMain.SelectedItem = $ui.tNew })
 $ui.btnSinceMissing.Add_Click({ $script:SinceClosed = $true; $ui.bdSince.Visibility = 'Collapsed'; $ui.tabMain.SelectedItem = $ui.tMissing })
 $ui.btnSinceCal.Add_Click({ $script:SinceClosed = $true; $ui.bdSince.Visibility = 'Collapsed'; $ui.tabMain.SelectedItem = $ui.tCalendar })
 
-$Win.Add_Closing({ try { Save-Settings } catch {}; if ($script:Lib.Count) { Save-Session } })
+$Win.Add_Closing({
+    try { Save-Settings } catch { Write-Verbose $_.Exception.Message }
+    if ($script:Lib.Count) { Save-Session }
+    # Ask any background work (downloads, checks) to stop so closing doesn't wait for it
+    foreach ($j in @($script:Jobs)) { try { [void]$j.PS.BeginStop($null, $null) } catch { Write-Verbose $_.Exception.Message } }
+})
 Write-StartLog 'Showing main window'
 # A display problem in one page shouldn't close the whole app: log it and carry on
 $Win.Dispatcher.Add_UnhandledException({
-    param($sender, $e)
-    try { Add-Content -LiteralPath (Join-Path $DataDir 'Logs\crash.log') -Value ("[{0}] (handled) {1}`n{2}`n" -f (Get-Date), $e.Exception.ToString(), $(if ($e.Exception.ErrorRecord) { $e.Exception.ErrorRecord.ScriptStackTrace })) } catch {}
-    try { Set-Status "Something went wrong (details in Data\Logs\crash.log): $($e.Exception.Message)" } catch {}
+    param($eventSource, $e)
+    try { Add-Content -LiteralPath (Join-Path $DataDir 'Logs\crash.log') -Value ("[{0}] (handled) {1}`n{2}`n" -f (Get-Date), $e.Exception.ToString(), $(if ($e.Exception.ErrorRecord) { $e.Exception.ErrorRecord.ScriptStackTrace })) } catch { Write-Verbose $_.Exception.Message }
+    try { Set-Status "Something went wrong (details in Logs\crash.log in the data folder): $($e.Exception.Message)" } catch { Write-Verbose $_.Exception.Message }
     $e.Handled = $true
 })
 [void]$Win.ShowDialog()
 $timer.Stop()
 Write-StartLog 'Closed'
-try { if ($script:Mutex) { $script:Mutex.ReleaseMutex(); $script:Mutex.Dispose() } } catch {}
+try { if ($script:Mutex) { $script:Mutex.ReleaseMutex(); $script:Mutex.Dispose() } } catch { Write-Verbose $_.Exception.Message }
