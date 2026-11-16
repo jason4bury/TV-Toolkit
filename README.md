@@ -6,7 +6,7 @@
 
 A Windows app for keeping an eye on the TV programmes on your NAS or media drive: what's new, what's airing, what's missing and what looks wrong on disk.
 
-![Version](https://img.shields.io/badge/version-v1.00-blue) ![Platform](https://img.shields.io/badge/platform-Windows-0078D6) ![PowerShell](https://img.shields.io/badge/PowerShell-5.1-5391FE) ![Licence](https://img.shields.io/badge/licence-MIT-green) ![Last commit](https://img.shields.io/github/last-commit/jason4bury/TV-Toolkit)
+![Version](https://img.shields.io/badge/version-v1.01-blue) ![Platform](https://img.shields.io/badge/platform-Windows-0078D6) ![PowerShell](https://img.shields.io/badge/PowerShell-5.1-5391FE) ![Licence](https://img.shields.io/badge/licence-MIT-green) ![Last commit](https://img.shields.io/github/last-commit/jason4bury/TV-Toolkit)
 
 ## ✨ Features
 
@@ -45,27 +45,28 @@ TV Toolkit reads your TV folders, matches each show with [TVmaze](https://www.tv
 
 ## 📦 Installation
 
-**Exe:** download `TV Toolkit v1.00.exe` from the [latest release](../../releases/latest) and run it. Nothing else to install.
+1. Download `TV-Toolkit-v1.01.zip` from the [latest release](../../releases/latest) and unzip it wherever you like to keep it.
+2. Double-click **TV Toolkit.cmd** in the unzipped folder. It makes a **TV Toolkit** shortcut there and in the Start menu, and starts TV Toolkit. From then on, use the shortcut, the Start menu or a pinned taskbar button.
 
-**Script:** clone or download the repo, then double-click **`Start TV Toolkit.cmd`**. It starts TV Toolkit with an execution-policy bypass for that run only; no Windows settings are changed. If you downloaded a zip and Windows blocks the files, right-click the zip, choose **Properties**, tick **Unblock**, then unzip it again.
+Nothing is installed and no Windows settings are changed. The shortcut runs the script with PowerShell's execution policy bypassed for that run only.
 
-### Build the exe
+**From the repo:** clone it, or download it as a zip. If you download a zip, right-click it, choose **Properties** and tick **Unblock** *before* unzipping, so Windows doesn't block the scripts. Then double-click **Start TV Toolkit.cmd**.
 
-Builds use the standard build script, which reads `build.json`, runs PSScriptAnalyzer, compiles the exe with [ps2exe](https://github.com/MScholtes/PS2EXE) and saves it to the project's `Builds\` folder (outside the repo) as `TV Toolkit v<version>.exe`:
+**Updating from v1.00 (the exe):** unzip the new release, double-click **TV Toolkit.cmd**, and delete `TV Toolkit v1.00.exe` and any shortcut to it. Your settings, show matches and cache are in `%APPDATA%\TV Toolkit\`, so they carry straight over.
 
-```powershell
-E:\Created\_shared\Build-Tool.ps1 -Project "E:\Created\Home\TV-Toolkit"
-```
+### Why no exe
 
-Until the shared build script is in place, double-click `Build-Exe.cmd` in the repo folder instead. It does the same build in Windows PowerShell 5.1 (no admin rights needed): it checks the script for syntax errors, installs ps2exe for your user the first time, and saves its output to `Build-Exe.log`. The version comes from `$AppVersion` at the top of `src\TV-Toolkit.ps1`, which matches the newest CHANGELOG entry.
+Home tools used to ship as PS2EXE exes, and antivirus programs (ESET among them) kept flagging those exes as generic trojans by mistake. A plain script and a shortcut give the same one-click start without the false alarms, and you can read exactly what runs.
 
-Some antivirus programs are wary of new ps2exe-built programs. If yours blocks the exe, allow it or keep using `Start TV Toolkit.cmd`.
+### Build a release
+
+Double-click **Build.cmd** in the repo folder. It reads `build.json`, checks every script for syntax errors and that `$AppVersion` matches the newest `CHANGELOG.md` entry, runs PSScriptAnalyzer if it's installed, copies the release files into `..\Builds\TV Toolkit v<version>\`, zips that folder for the GitHub release, refreshes `..\Builds\TV Toolkit.lnk` (what the Home Launcher starts) and scans the result with ESET's command-line scanner if it's installed.
 
 ## 🚀 Usage
 
 ### First run
 
-1. Start TV Toolkit. The first time, it opens **Settings**.
+1. Start TV Toolkit (the shortcut, the Start menu, or **TV Toolkit.cmd**). The first time, it opens **Settings**.
 2. Enter your TV folder, one per line (for example `T:\` or `\\NAS\TV`), and a holding folder for files you move out of the library.
 3. Press **Save settings**, then **Rescan** (or `F5`).
 
@@ -94,10 +95,10 @@ T:\Show Name\S30\Show Name - 30x01 - Episode Title.mkv
 
 ### Troubleshooting
 
-- **Nothing happens when I start it**: check `Logs\launch.log` and `Logs\startup.log` in the data folder (see Configuration). Opening it again while it's already running just brings the existing window to the front.
+- **Nothing happens when I start it**: run `"TV Toolkit.cmd" debug` from a command prompt in the release folder to see any errors, and check `Logs\startup.log` in the data folder (see Configuration; `Logs\launch.log` is written when you start it from the repo). Opening it again while it's already running just brings the existing window to the front.
 - **Rescan says it can't reach a folder**: the NAS is off or the drive isn't mapped. Your last scan is kept; rescan when it's back.
 - **Something went wrong on a page**: details are written to `Logs\crash.log`, and the app keeps running.
-- **"Running scripts is disabled"**: start it with `Start TV Toolkit.cmd`, which bypasses the execution policy for TV Toolkit only.
+- **"Running scripts is disabled"**: start it with the TV Toolkit shortcut or **TV Toolkit.cmd** (or **Start TV Toolkit.cmd** in the repo), which bypass the execution policy for TV Toolkit only.
 - **A show is matched to the wrong programme**: open it and press **Fix match...**.
 
 ## ⚙️ Configuration

@@ -2,9 +2,31 @@
 
 All notable changes to TV Toolkit are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), with versions numbered
-`<major>.<minor>` and a two-digit minor (v1.00, v1.01 ... v1.10) to match the exe file names.
+`<major>.<minor>` and a two-digit minor (v1.00, v1.01 ... v1.10) to match the release names.
 
 ## [Unreleased]
+
+## [1.01] - 2026-11-16
+### Changed
+- **No exe any more.** Antivirus programs (ESET among them) kept flagging the PS2EXE exe as a
+  generic trojan by mistake, so TV Toolkit now ships as its script, like the other Home tools.
+  The release is `TV-Toolkit-v1.01.zip`: unzip it and double-click **TV Toolkit.cmd**, which
+  makes a **TV Toolkit** shortcut (in that folder and in the Start menu) that starts TV Toolkit
+  without a console window. `"TV Toolkit.cmd" debug` starts it in the console to show any errors.
+  Settings and data stay in `%APPDATA%\TV Toolkit`, so nothing needs moving.
+- The taskbar button shows TV Toolkit's own icon (not PowerShell's), and pinning it pins TV Toolkit:
+  the script sets the same taskbar ID (`jason4bury.TV-Toolkit`) as the shortcut.
+- The window icon comes from `assets\TV-Toolkit.ico`, beside the script in a release or in
+  `Source\assets\` in the repo.
+- `Build.cmd` (the Home template build) replaces `Build-Exe.cmd`. It checks the scripts and the
+  version, runs PSScriptAnalyzer, makes `Builds\TV Toolkit v<version>\` and its zip, refreshes
+  `Builds\TV Toolkit.lnk` for the Home Launcher and scans the build with ESET if it's installed.
+  `build.json` has a Release section instead of the ps2exe options.
+
+### Internal
+- Exe-only code removed (the `MainModule` path check and taking the icon from the exe). New
+  `src\New-TVToolkitShortcut.ps1` (template shortcut maker) and `release\TV Toolkit.cmd`.
+  `.gitignore` covers `*.lnk`.
 
 ## [1.00] - 2026-11-07
 First release in the house style. Version numbers restart here; the history before this

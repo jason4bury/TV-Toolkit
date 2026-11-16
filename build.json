@@ -3,13 +3,19 @@
   "EntryScript": "src\\TV-Toolkit.ps1",
   "Icon": "assets\\TV-Toolkit.ico",
   "Side": "Home",
-  "IncludeFiles": [],
   "Description": "PowerShell/WPF tool for browsing, tracking and tidying the TV shows on your NAS",
-  "Ps2exe": {
-    "STA": true,
-    "NoConsole": true,
-    "NoOutput": true,
-    "NoError": true,
-    "NoConfigFile": true
+  "RequireAdmin": false,
+  "Release": {
+    "Files": {
+      "TV-Toolkit.ps1": "src\\TV-Toolkit.ps1",
+      "New-TVToolkitShortcut.ps1": "src\\New-TVToolkitShortcut.ps1",
+      "TV Toolkit.cmd": "release\\TV Toolkit.cmd",
+      "assets\\TV-Toolkit.ico": "assets\\TV-Toolkit.ico",
+      "assets\\TV-Toolkit.png": "assets\\TV-Toolkit.png",
+      "README.md": "README.md",
+      "CHANGELOG.md": "CHANGELOG.md",
+      "LICENSE": "LICENSE"
+    },
+    "Shortcut": "New-TVToolkitShortcut.ps1"
   }
 }

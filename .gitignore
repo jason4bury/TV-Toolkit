@@ -6,6 +6,8 @@ Data/
 # Builds live in ..\Builds\, outside the repo. Safety net in case one lands here.
 Builds/
 *.exe
+*.exe.old
+*.lnk
 
 # Exports made from the app can list your library and file paths - keep them out
 TV Shows*.html
@@ -14,7 +16,7 @@ TV Toolkit - coming up*.ics
 TV Toolkit settings*.zip
 TVToolkit-backup-*.zip
 
-# Logs, temp files and backups (Build-Exe.log, editor backups)
+# Logs, temp files and backups (Build.log, editor backups)
 *.log
 *.tmp
 *.bak*

@@ -9,8 +9,9 @@
     duplicates and problem files, and never renames, moves or deletes anything without
     asking first.
 
-    Start it with "Start TV Toolkit.cmd", or build "TV Toolkit v<version>.exe" with
-    Build-Exe.cmd (see README.md).
+    From a release, double-click "TV Toolkit.cmd" once; it makes a TV Toolkit shortcut (there and in
+    the Start menu) that starts this script without a console window. From the repo, use
+    "Start TV Toolkit.cmd". There is no exe (see README.md, "Why no exe").
 
 .NOTES
     Version:   see $AppVersion below (matches the newest CHANGELOG.md entry)
@@ -20,8 +21,9 @@
     Show data: TVmaze (https://www.tvmaze.com), CC BY-SA 4.0
 #>
 $AppName    = 'TV Toolkit'
-$AppVersion = '1.00'
+$AppVersion = '1.01'
 $Copyright  = 'Copyright (c) 2026 Jason Rhodes'
+$AppId      = 'jason4bury.TV-Toolkit'   # taskbar ID; the shortcut made by New-TVToolkitShortcut.ps1 uses the same one
 
 $CoreScript = {
 # ===================== TV Toolkit core (shared by UI and background workers) =====================
@@ -924,24 +926,23 @@ function New-ShowListHtml($lib, $MatchMap, $index, [switch]$Episodes) {
 
 # ===================== UI =====================
 $ErrorActionPreference = 'Continue'
-# Runs as src\TV-Toolkit.ps1 (started by 'Start TV Toolkit.cmd') or as 'TV Toolkit v<version>.exe'
-# in the project's Builds folder. Either way, settings and data live in %APPDATA%\TV Toolkit.
-$ExePath = ''
-try { $ExePath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName } catch { Write-Verbose $_.Exception.Message }
-$IsExe = [bool]($ExePath -and ([IO.Path]::GetFileNameWithoutExtension($ExePath) -notmatch '^(powershell|pwsh|powershell_ise)$'))
-if ($IsExe) {
-    $AppDir = Split-Path -Parent $ExePath
-} else {
-    $AppDir = $PSScriptRoot
-    if (-not $AppDir) { $AppDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
-}
+# Runs from a release folder (Builds\TV Toolkit v<version>\, started by the TV Toolkit shortcut) or
+# from the repo as src\TV-Toolkit.ps1 (started by 'Start TV Toolkit.cmd'). Either way, settings and
+# data live in %APPDATA%\TV Toolkit.
+$AppDir = $PSScriptRoot
+if (-not $AppDir) { $AppDir = Split-Path -Parent $PSCommandPath }
+if (-not $AppDir) { $AppDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
+# Icon and logo: assets\ beside the script in a release, Source\assets\ (beside src\) in the repo.
+$AssetsDir = @((Join-Path $AppDir 'assets'), (Join-Path (Split-Path -Parent $AppDir) 'assets')) |
+    Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 $DataDir = Join-Path ([Environment]::GetFolderPath('ApplicationData')) $AppName
 # Before v1.00 everything was kept in a 'Data' folder beside the old App folder (or beside the exe).
-# These are the places it could be, so it can be copied across the first time v1.00 starts.
+# These are the places it could be, so it can be copied across the first time it starts with no
+# settings in %APPDATA%. From a release folder they point into Builds\ and are simply not found.
 $OldDataDirs = @(
     (Join-Path (Split-Path -Parent $AppDir) 'Data')                      # Source\Data, beside src\ (was beside App\)
-    (Join-Path $AppDir 'Data')                                           # beside an old exe
-    (Join-Path (Split-Path -Parent $AppDir) 'Source\Data')               # exe in Builds\, data in Source\Data
+    (Join-Path $AppDir 'Data')                                           # beside an old pre-1.00 exe
+    (Join-Path (Split-Path -Parent $AppDir) 'Source\Data')               # old exe in Builds\, data in Source\Data
 ) | Select-Object -Unique
 $StartLog = Join-Path $DataDir 'Logs\startup.log'
 $StartClock = [Diagnostics.Stopwatch]::StartNew()
@@ -963,6 +964,13 @@ trap {
     break
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.IO.Compression.FileSystem
+
+# One taskbar button with TV Toolkit's own icon (not PowerShell's), and pinning it pins TV Toolkit.
+# Set before any window opens, and the same ID as the shortcut.
+try {
+    Add-Type -Namespace 'HomeTool' -Name 'Shell' -MemberDefinition '[DllImport("shell32.dll", CharSet = CharSet.Unicode)] public static extern int SetCurrentProcessExplicitAppUserModelID(string appId);'
+    [void][HomeTool.Shell]::SetCurrentProcessExplicitAppUserModelID($AppId)
+} catch { Write-StartLog "No taskbar ID: $($_.Exception.Message)" }
 
 # ---------- one copy at a time ----------
 # A second launch asks the running copy to come to the front, then quits. If the running copy
@@ -2413,14 +2421,13 @@ function New-Window([string]$xamlText) {
 $main = New-Window $MainXaml
 Write-StartLog 'Main window built'
 $Win = $main.Window
-# Window and taskbar icon: assets\TV-Toolkit.ico when running the script, otherwise the icon built into the exe
+# Window and taskbar icon from assets\TV-Toolkit.ico (loaded into memory, so the file isn't kept locked).
 try {
-    $ico = Join-Path (Split-Path -Parent $AppDir) 'assets\TV-Toolkit.ico'
-    if (-not $IsExe -and (Test-Path -LiteralPath $ico)) { $Win.Icon = [Windows.Media.Imaging.BitmapFrame]::Create([Uri]::new($ico)) }
-    elseif ($IsExe) {
-        Add-Type -AssemblyName System.Drawing
-        $hi = [Drawing.Icon]::ExtractAssociatedIcon($ExePath)
-        $Win.Icon = [Windows.Interop.Imaging]::CreateBitmapSourceFromHIcon($hi.Handle, [Windows.Int32Rect]::Empty, [Windows.Media.Imaging.BitmapSizeOptions]::FromEmptyOptions())
+    if ($AssetsDir) {
+        $ico = Join-Path $AssetsDir 'TV-Toolkit.ico'
+        if (Test-Path -LiteralPath $ico) {
+            $Win.Icon = [Windows.Media.Imaging.BitmapFrame]::Create([Uri]::new($ico), [Windows.Media.Imaging.BitmapCreateOptions]::None, [Windows.Media.Imaging.BitmapCacheOption]::OnLoad)
+        }
     }
 } catch { Write-Verbose $_.Exception.Message }
 $ui = $main.UI
@@ -4204,15 +4211,19 @@ $ui.txtAboutVersion.Text = "v$AppVersion  $DOT  $Copyright  $DOT  MIT licence  $
 $ui.txtHeaderVersion.Text = "v$AppVersion"
 $Win.Title = "$AppName v$AppVersion"
 $ui.txtAboutNew.Text = @"
+1.01
+$DOT  No exe any more: antivirus programs kept flagging it by mistake. TV Toolkit.cmd in the release makes a TV Toolkit shortcut (there and in the Start menu) that starts it without a console window. Settings and data are unchanged.
+$DOT  The taskbar button shows TV Toolkit's own icon, and pinning it pins TV Toolkit.
+
 1.00
 $DOT  First release in the house style. Version numbers restart here; the changes from 1.0.0 to 1.9.1 are in docs\HISTORY-before-1.00.md.
 $DOT  Settings and data now live in %APPDATA%\TV Toolkit, so rebuilding or moving the app never touches them. The old Data folder is copied across the first time this version starts.
 $DOT  Rescan keeps your last scan if a TV folder can't be reached (NAS off or drive not mapped) instead of showing an empty library.
 $DOT  Moving a duplicate or problem file to the holding folder moves only that copy and its subtitles and artwork, never another copy of the episode with a different extension. Renaming works the same way.
 $DOT  New installs start with no TV folder filled in, instead of assuming T:\.
-$DOT  About shows the copyright and licence. Start TV Toolkit.cmd starts src\TV-Toolkit.ps1, and the exe is built as 'TV Toolkit v1.00.exe'.
+$DOT  About shows the copyright and licence.
 "@
-$ui.txtAboutData.Text = "Everything TV Toolkit keeps (settings, show matches, the image cache, logs and backups) is in:`n$DataDir`n`nUtilities > Open data folder opens it. Nothing is stored next to the app, so rebuilding or moving it keeps your settings."
+$ui.txtAboutData.Text = "Everything TV Toolkit keeps (settings, show matches, the image cache, logs and backups) is in:`n$DataDir`n`nUtilities > Open data folder opens it. Nothing is stored next to the app, so updating or moving it keeps your settings."
 
 # ---------- start ----------
 Set-SettingsForm
