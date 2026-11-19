@@ -21,7 +21,7 @@
     Show data: TVmaze (https://www.tvmaze.com), CC BY-SA 4.0
 #>
 $AppName    = 'TV Toolkit'
-$AppVersion = '1.02'
+$AppVersion = '1.03'
 $Copyright  = 'Copyright (c) 2026 Jason Rhodes'
 $AppId      = 'jason4bury.TV-Toolkit'   # taskbar ID; the shortcut made by New-TVToolkitShortcut.ps1 uses the same one
 
@@ -1003,7 +1003,7 @@ try {
             </UniformGrid>
             <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                    <Border Background="#F4C542" CornerRadius="5" Padding="7,1" Margin="0,0,9,0"><TextBlock Text="TV" FontFamily="Bahnschrift SemiBold, Segoe UI" FontSize="20" Foreground="#101318"/></Border>
+                    <Border Background="#F4C542" CornerRadius="5" Padding="7,1" Margin="0,0,9,0"><TextBlock Text="TV" FontFamily="Bahnschrift SemiBold, Segoe UI" FontSize="20" Foreground="#111418"/></Border>
                     <TextBlock Text="Toolkit" FontFamily="Bahnschrift SemiLight, Segoe UI" FontSize="22" Foreground="#E9ECF2" VerticalAlignment="Center"/>
                 </StackPanel>
                 <TextBlock Name="SplashText" Text="Starting..." Foreground="#98A2B3" FontFamily="Segoe UI" FontSize="12" HorizontalAlignment="Center" Margin="0,14,0,0"/>
@@ -1067,7 +1067,8 @@ function Get-DefaultSettings {
     # No TV folder is assumed: the first start opens Settings to ask for one
     return @{ Roots = @(); HoldFolder = ''; RefreshDays = 3
               NewDays = 14; LibView = 'posters'; IgnoreMissing = @()
-              MissOwned = $false; MissSpecials = $false; MissContinuing = $false; LibFilter = 0; LibSort = 0 }
+              MissOwned = $false; MissSpecials = $false; MissContinuing = $false; LibFilter = 0; LibSort = 0
+              Theme = 'Dark' }   # Dark (the Test Card look), Light or System (follow Windows)
 }
 function Import-Settings {
     $s = Get-DefaultSettings
@@ -1079,6 +1080,32 @@ function Import-Settings {
 }
 function Save-Settings { Write-JsonFile $SettingsPath $TVT.Settings }
 Import-Settings
+
+# ---------- look: the dark "Test Card" theme, or its light version ----------
+# Every window's XAML and every colour made in code passes through Convert-ThemeColours, which
+# swaps each dark colour for its light partner when the light look is on. The colour bars and
+# the yellow TV badge are the same in both. The look is chosen at start, so a change in
+# Settings takes effect the next time TV Toolkit starts.
+$script:LightColours = @{
+    '#101318' = '#F2F4F7'; '#13171D' = '#E7EAEF'; '#171B22' = '#FFFFFF'; '#1F242D' = '#F3F5F8'; '#262C37' = '#E8ECF1'
+    '#2C333F' = '#D2D8E0'; '#E9ECF2' = '#1A1F27'; '#98A2B3' = '#596374'; '#C9CFDA' = '#3A4351'; '#35C2D6' = '#0B8497'
+    '#1C4F58' = '#CBEDF2'; '#0C1014' = '#FFFFFF'; '#5CC98A' = '#1F8A4C'; '#F0A04B' = '#B4650E'; '#E5566B' = '#C3263F'
+    '#232935' = '#E1E6EC'; '#3A4250' = '#B9C1CC'; '#1A1F27' = '#F6F8FA'; '#1A1E25' = '#ECEFF3'; '#16352A' = '#DDF2E5'
+    '#2A1C22' = '#FCEBEE'; '#5A2A35' = '#E8B7C0'; '#F3A3B0' = '#A3233A'
+}
+function Test-LightLook {
+    $mode = [string]$TVT.Settings.Theme
+    if ($mode -eq 'Light') { return $true }
+    if ($mode -eq 'System') {
+        try { return ([int](Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name AppsUseLightTheme -ErrorAction Stop).AppsUseLightTheme -eq 1) } catch { return $false }
+    }
+    return $false
+}
+$script:LightLook = Test-LightLook
+function Convert-ThemeColours([string]$text) {
+    if (-not $script:LightLook -or -not $text) { return $text }
+    return [regex]::Replace($text, '#[0-9A-Fa-f]{6}\b', { param($m) $k = $m.Value.ToUpperInvariant(); if ($script:LightColours.ContainsKey($k)) { $script:LightColours[$k] } else { $m.Value } })
+}
 
 # ---------- window ----------
 $ThemeXaml = @'
@@ -1381,7 +1408,7 @@ $MainXaml = @'
                 </Grid.ColumnDefinitions>
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                     <Border Background="{StaticResource Accent2}" CornerRadius="5" Padding="7,1" Margin="0,0,9,0">
-                        <TextBlock Text="TV" FontFamily="Bahnschrift SemiBold, Segoe UI" FontSize="20" Foreground="#101318"/>
+                        <TextBlock Text="TV" FontFamily="Bahnschrift SemiBold, Segoe UI" FontSize="20" Foreground="#111418"/>
                     </Border>
                     <TextBlock Text="Toolkit" FontFamily="Bahnschrift SemiLight, Segoe UI" FontSize="22" VerticalAlignment="Center"/>
                     <TextBlock x:Name="txtHeaderVersion" Foreground="{StaticResource Sub}" FontSize="12" VerticalAlignment="Bottom" Margin="8,0,0,4"/>
@@ -1510,11 +1537,11 @@ $MainXaml = @'
                                                             <TextBlock Text="{Binding Title}" TextWrapping="Wrap" Foreground="{StaticResource Sub}" FontSize="15" Margin="12" VerticalAlignment="Center" TextAlignment="Center" FontFamily="Bahnschrift, Segoe UI"/>
                                                         </Border>
                                                         <Image Source="{Binding Poster}" Stretch="UniformToFill"/>
-                                                        <Border VerticalAlignment="Bottom" HorizontalAlignment="Right" Width="24" Height="24" CornerRadius="12" Margin="6" Background="#5CC98A" BorderBrush="#101318" BorderThickness="2" Visibility="{Binding DoneVis}" ToolTip="{Binding DoneTip}">
-                                                            <TextBlock Text="&#x2713;" Foreground="#101318" FontWeight="Bold" FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                        <Border VerticalAlignment="Bottom" HorizontalAlignment="Right" Width="24" Height="24" CornerRadius="12" Margin="6" Background="#5CC98B" BorderBrush="#101318" BorderThickness="2" Visibility="{Binding DoneVis}" ToolTip="{Binding DoneTip}">
+                                                            <TextBlock Text="&#x2713;" Foreground="#111418" FontWeight="Bold" FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                                         </Border>
                                                         <Border VerticalAlignment="Top" HorizontalAlignment="Right" Background="{Binding BadgeBrush}" CornerRadius="3" Margin="6" Padding="6,2" Visibility="{Binding BadgeVis}">
-                                                            <TextBlock Text="{Binding Badge}" Foreground="#101318" FontSize="10.5" FontWeight="Bold"/>
+                                                            <TextBlock Text="{Binding Badge}" Foreground="#111418" FontSize="10.5" FontWeight="Bold"/>
                                                         </Border>
                                                     </Grid>
                                                     <TextBlock Text="{Binding Title}" FontWeight="SemiBold" Margin="2,7,2,0" TextTrimming="CharacterEllipsis"/>
@@ -1761,7 +1788,7 @@ $MainXaml = @'
                                                                         <TextBlock Text="{Binding EpLine}" FontSize="11.5" Foreground="#C9CFDA" TextTrimming="CharacterEllipsis" Margin="0,1,0,0"/>
                                                                         <TextBlock Text="{Binding TimeLine}" FontSize="11" Foreground="{StaticResource Sub}" TextTrimming="CharacterEllipsis" Margin="0,1,0,0"/>
                                                                         <Border Background="{Binding StatusBg}" CornerRadius="3" Padding="5,1" HorizontalAlignment="Left" Margin="0,4,0,0">
-                                                                            <TextBlock Text="{Binding Status}" FontSize="10" FontWeight="Bold" Foreground="#101318"/>
+                                                                            <TextBlock Text="{Binding Status}" FontSize="10" FontWeight="Bold" Foreground="#111418"/>
                                                                         </Border>
                                                                     </StackPanel>
                                                                 </Grid>
@@ -2302,10 +2329,67 @@ $MainXaml = @'
                                 </StackPanel>
                             </StackPanel>
                         </Border>
+                        <Border Style="{StaticResource Card}" Margin="0,0,0,14">
+                            <StackPanel>
+                                <TextBlock Text="Look" Style="{StaticResource H2}"/>
+                                <StackPanel Orientation="Horizontal">
+                                    <RadioButton x:Name="rbThemeDark" GroupName="Theme" Content="Dark (Test Card)" Foreground="{StaticResource Text}" Margin="0,0,18,0"/>
+                                    <RadioButton x:Name="rbThemeLight" GroupName="Theme" Content="Light" Foreground="{StaticResource Text}" Margin="0,0,18,0"/>
+                                    <RadioButton x:Name="rbThemeSystem" GroupName="Theme" Content="Follow Windows" Foreground="{StaticResource Text}"/>
+                                </StackPanel>
+                                <TextBlock Style="{StaticResource Hint}" Margin="0,8,0,0" Text="A new look is used the next time TV Toolkit starts."/>
+                            </StackPanel>
+                        </Border>
                         <WrapPanel>
                             <Button x:Name="btnSaveSettings" Content="Save settings" Style="{StaticResource AccentButton}"/>
                             <TextBlock x:Name="txtSettingsSaved" Foreground="{StaticResource Good}" VerticalAlignment="Center"/>
                         </WrapPanel>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <!-- ================= HELP ================= -->
+            <TabItem Header="Help" Style="{StaticResource Nav}" x:Name="tHelp">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel Margin="24,18" MaxWidth="900" HorizontalAlignment="Left">
+                        <TextBlock Text="Help" Style="{StaticResource H1}" Margin="0,0,0,6"/>
+                        <TextBlock Style="{StaticResource Hint}" FontSize="13.5" Margin="0,0,0,16" Text="TV Toolkit reads your TV folders, matches each show with TVmaze and keeps an eye on what you have. It never renames, moves or deletes anything without asking, and files you move out go to a holding folder rather than being deleted."/>
+                        <Border Style="{StaticResource Card}" Margin="0,0,0,14">
+                            <StackPanel>
+                                <TextBlock Text="Getting started" Style="{StaticResource H2}"/>
+                                <TextBlock TextWrapping="Wrap" LineHeight="21" Text="1.  Settings: put in your TV folders, one per line. Each folder inside is a show (Show\S01\Show - 1x01 - Title.mkv). Season folders can be S01, Season 1 or Specials.&#x0a;2.  Save settings, then scan (F5). The first scan matches every show with TVmaze, which takes a minute or two.&#x0a;3.  A show marked NO MATCH or CHECK MATCH needs its match checking: open it and choose Confirm match if it's right, or Fix match... to pick the show."/>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource Card}" Margin="0,0,0,14">
+                            <StackPanel>
+                                <TextBlock Text="Library" Style="{StaticResource H2}"/>
+                                <TextBlock TextWrapping="Wrap" LineHeight="21" Text="A poster wall or a sortable list. Badges show new episodes, episodes airing this week, ended shows and matches to check; a green tick means you have every aired episode of the latest season. Click a show for its overview, cast, seasons and episode list.&#x0a;Search by name, channel, genre, status or year with Ctrl+F (Esc clears), or type a letter to jump to shows starting with it."/>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource Card}" Margin="0,0,0,14">
+                            <StackPanel>
+                                <TextBlock Text="Keeping up" Style="{StaticResource H2}"/>
+                                <TextBlock TextWrapping="Wrap" LineHeight="21" Text="New: episodes that arrived on the drive recently, newest first.&#x0a;Calendar: the week ahead with UK air times and channels, and anything that aired in the last 7 days that you don't have. Save the next 3 months as an .ics file for Outlook, Google Calendar or your phone.&#x0a;Missing episodes: aired episodes that aren't on disk, with options for specials, owned seasons only and continuing shows only."/>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource Card}" Margin="0,0,0,14">
+                            <StackPanel>
+                                <TextBlock Text="Tidying up" Style="{StaticResource H2}"/>
+                                <TextBlock TextWrapping="Wrap" LineHeight="21" Text="Filename checker: files that don't follow Show - 1x01 - Title, have the wrong title or sit in the wrong season folder. Preview, rename (subtitles, .nfo files and artwork go with the video) and undo.&#x0a;Duplicates &amp; quality: more than one file for the same episode, and picture quality per show. Move the copies you don't want to the holding folder (set it in Settings).&#x0a;Problem files: tiny or unreadable episodes, unfinished downloads, samples, episodes outside a season folder, junk and orphan files, and empty folders."/>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource Card}" Margin="0,0,0,14">
+                            <StackPanel>
+                                <TextBlock Text="Everything else" Style="{StaticResource H2}"/>
+                                <TextBlock TextWrapping="Wrap" LineHeight="21" Text="Cast: everyone in your shows, with photos, biographies and their other TV work.&#x0a;Stats: shows, episodes, space used, viewing time, free space per drive and charts.&#x0a;Utilities: backup and restore, moving settings to another PC, a printable show list, refreshing all show info and clearing the picture cache.&#x0a;Settings > Look: the dark Test Card look, a light version, or follow Windows."/>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource Card}" Margin="0,0,0,14">
+                            <StackPanel>
+                                <TextBlock Text="Keys" Style="{StaticResource H2}"/>
+                                <TextBlock TextWrapping="Wrap" LineHeight="21" Text="F5  rescan the library     Ctrl+F  search     Esc  clear the search     F1  this page"/>
+                            </StackPanel>
+                        </Border>
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>
@@ -2318,7 +2402,7 @@ $MainXaml = @'
                         <StackPanel>
                         <StackPanel Orientation="Horizontal">
                             <Border Background="{StaticResource Accent2}" CornerRadius="6" Padding="10,2" Margin="0,0,12,0">
-                                <TextBlock Text="TV" FontFamily="Bahnschrift SemiBold, Segoe UI" FontSize="30" Foreground="#101318"/>
+                                <TextBlock Text="TV" FontFamily="Bahnschrift SemiBold, Segoe UI" FontSize="30" Foreground="#111418"/>
                             </Border>
                             <StackPanel VerticalAlignment="Center">
                                 <TextBlock Text="TV Toolkit" Style="{StaticResource H1}"/>
@@ -2409,7 +2493,7 @@ $MainXaml = @'
 </Window>
 '@
 function New-Window([string]$xamlText) {
-    $x = [xml]($xamlText.Replace('<!--THEME-->', $ThemeXaml))
+    $x = [xml](Convert-ThemeColours ($xamlText.Replace('<!--THEME-->', $ThemeXaml)))
     $w = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $x))
     $names = @{}
     foreach ($n in $x.SelectNodes("//*[@*[local-name()='Name']]")) {
@@ -2458,7 +2542,7 @@ $MsgXaml = @'
         <Border DockPanel.Dock="Top" Background="#13171D" BorderBrush="{StaticResource Line}" BorderThickness="0,0,0,1" Padding="20,12">
             <StackPanel Orientation="Horizontal">
                 <Border x:Name="mBadge" Width="28" Height="28" CornerRadius="14" VerticalAlignment="Center">
-                    <TextBlock x:Name="mGlyph" FontFamily="Bahnschrift SemiBold, Segoe UI" FontSize="16" Foreground="#101318" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="mGlyph" FontFamily="Bahnschrift SemiBold, Segoe UI" FontSize="16" Foreground="#111418" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                 </Border>
                 <TextBlock x:Name="mHeading" Style="{StaticResource H2}" Margin="12,0,0,0" VerticalAlignment="Center"/>
             </StackPanel>
@@ -2495,7 +2579,7 @@ function Show-TVMessage([string]$Text, [string]$Kind = 'Information', [string[]]
     try { if ($Win -and $Win.Icon) { $w.Icon = $Win.Icon } } catch { Write-Verbose $_.Exception.Message }
     if ($owner) { try { $w.Owner = $owner } catch { $owner = $null } }
     if (-not $owner) { $w.WindowStartupLocation = 'CenterScreen'; $w.Topmost = $true; $w.ShowInTaskbar = $true }
-    $u.mBadge.Background = (New-Object Windows.Media.BrushConverter).ConvertFromString($k.Color)
+    $u.mBadge.Background = (New-Object Windows.Media.BrushConverter).ConvertFromString($k.Color)   # bright in both looks, like the badges
     $u.mGlyph.Text = $k.Glyph
     $u.mHeading.Text = $Heading
     $u.mText.Text = $Text
@@ -2743,10 +2827,11 @@ $ui.cmbLibSort.ItemsSource = @('Name', 'Recently added', 'Most episodes', 'Bigge
 $ui.cmbLibFilter.SelectedIndex = $(if ([int]$TVT.Settings.LibFilter -le 6) { [int]$TVT.Settings.LibFilter } else { 0 })
 $ui.cmbLibSort.SelectedIndex = [int]$TVT.Settings.LibSort
 
-$BadgeYellow = $Win.FindResource('Accent2')
-$BadgeCyan = $Win.FindResource('Accent')
-$BadgeRed = $Win.FindResource('Bad')
-$BadgeGreen = $Win.FindResource('Good')
+# Badges keep the bright Test Card colours (with dark text) in both looks
+$BadgeYellow = (New-Object Windows.Media.BrushConverter).ConvertFromString('#F4C542')
+$BadgeCyan = (New-Object Windows.Media.BrushConverter).ConvertFromString('#35C2D6')
+$BadgeRed = (New-Object Windows.Media.BrushConverter).ConvertFromString('#E5566B')
+$BadgeGreen = (New-Object Windows.Media.BrushConverter).ConvertFromString('#5CC98A')
 $script:Transparent = [Windows.Media.Brushes]::Transparent
 $script:MarkDarkFg = New-Object Windows.Media.SolidColorBrush ([Windows.Media.Color]::FromRgb(16, 19, 24))
 $script:MarkDarkFg.Freeze()
@@ -3404,11 +3489,11 @@ function Update-StatsPage {
 }
 
 # ---------- calendar page ----------
-function New-Brush([string]$hex) { $b = (New-Object Windows.Media.BrushConverter).ConvertFromString($hex); $b.Freeze(); return $b }
+function New-Brush([string]$hex) { $b = (New-Object Windows.Media.BrushConverter).ConvertFromString((Convert-ThemeColours $hex)); $b.Freeze(); return $b }
 $CalBr = @{
     Have = (New-Brush '#5CC98A'); Missing = (New-Brush '#E5566B'); Today = (New-Brush '#F4C542'); Upcoming = (New-Brush '#98A2B3')
     HeadToday = (New-Brush '#F4C542'); HeadNormal = (New-Brush '#1F242D'); HeadPast = (New-Brush '#1A1E25')
-    FgDark = (New-Brush '#101318'); FgLight = (New-Brush '#E9ECF2'); SubDark = (New-Brush '#3A3320'); SubLight = (New-Brush '#98A2B3')
+    FgDark = (New-Brush '#111418'); FgLight = (New-Brush '#E9ECF2'); SubDark = (New-Brush '#3A3320'); SubLight = (New-Brush '#98A2B3')
     BorderToday = (New-Brush '#F4C542'); BorderNormal = (New-Brush '#2C333F'); CountNormal = (New-Brush '#35C2D6')
 }
 function ConvertTo-IcsText([string]$t) { return $t.Replace('\', '\\').Replace(';', '\;').Replace(',', '\,').Replace("`r", '').Replace("`n", '\n') }
@@ -4235,6 +4320,7 @@ function Set-SettingsForm {
     $ui.txtHold.Text = "$($s.HoldFolder)"
     $ui.txtRefreshDays.Text = "$($s.RefreshDays)"
     $ui.txtNewDays.Text = "$($s.NewDays)"
+    switch ([string]$s.Theme) { 'Light' { $ui.rbThemeLight.IsChecked = $true } 'System' { $ui.rbThemeSystem.IsChecked = $true } default { $ui.rbThemeDark.IsChecked = $true } }
 }
 function Read-SettingsForm {
     $s = $TVT.Settings
@@ -4243,12 +4329,15 @@ function Read-SettingsForm {
     $s.HoldFolder = $ui.txtHold.Text.Trim()
     $d = 3; [void][int]::TryParse($ui.txtRefreshDays.Text, [ref]$d); if ($d -lt 1) { $d = 1 }; $s.RefreshDays = $d
     $nd = 14; [void][int]::TryParse($ui.txtNewDays.Text, [ref]$nd); if ($nd -lt 1) { $nd = 1 }; $s.NewDays = $nd
+    $s.Theme = if ($ui.rbThemeLight.IsChecked) { 'Light' } elseif ($ui.rbThemeSystem.IsChecked) { 'System' } else { 'Dark' }
     return ($oldRoots -ne (@($s.Roots) -join '|'))
 }
 $ui.btnSaveSettings.Add_Click({
+    $lookWas = $script:LightLook
     $rootsChanged = Read-SettingsForm
     Save-Settings
     $ui.txtSettingsSaved.Text = "Saved at $(Get-Date -Format 'HH:mm')"
+    if ((Test-LightLook) -ne $lookWas) { $ui.txtSettingsSaved.Text += '. The new look is used the next time TV Toolkit starts.' }
     Update-LibraryView
     Update-NewTabHeader
     if ($rootsChanged -and (Confirm-Action 'Your TV folders changed. Rescan now?' $AppName 'Rescan now' 'Later')) { Start-Scan }
@@ -4286,6 +4375,7 @@ $ui.tabMain.Add_SelectionChanged({
 $Win.Add_PreviewKeyDown({
     param($eventSource, $e)
     if ($e.Key -eq 'F5') { Start-Scan; $e.Handled = $true }
+    if ($e.Key -eq 'F1') { $ui.tabMain.SelectedItem = $ui.tHelp; $e.Handled = $true }
     elseif ($e.Key -eq 'F' -and [Windows.Input.Keyboard]::Modifiers -eq 'Control') { $ui.txtSearch.Focus() | Out-Null; $ui.txtSearch.SelectAll(); $e.Handled = $true }
     elseif ($e.Key -eq 'Escape' -and -not $ui.txtSearch.IsKeyboardFocused -and $ui.tabMain.SelectedItem -eq $ui.tLibrary -and $script:CurrentShow) { Close-Show; $e.Handled = $true }
 })
@@ -4295,6 +4385,10 @@ $ui.txtAboutVersion.Text = "v$AppVersion  $DOT  $Copyright  $DOT  MIT licence  $
 $ui.txtHeaderVersion.Text = "v$AppVersion"
 $Win.Title = "$AppName v$AppVersion"
 $ui.txtAboutNew.Text = @"
+1.03
+$DOT  A light look: Settings > Look chooses the dark Test Card look (as before), a light version, or follow Windows.
+$DOT  Help: a new Help page (or F1) on getting started, the library, keeping up, tidying up and the keys.
+
 1.02
 $DOT  Messages and questions now come up in TV Toolkit's own look (dark window, test-card colour bars, coloured badge, cyan main button) instead of Windows' plain grey box. They sit over whichever TV Toolkit window is open, and you can select and copy their text.
 $DOT  Questions before renaming, moving, removing, restoring or importing have plainly named buttons, such as Rename or Move them, and Cancel.

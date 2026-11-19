@@ -6,6 +6,19 @@ All notable changes to TV Toolkit are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.03] - 2026-11-19
+### Added
+- **A light look.** Settings has a new **Look** card: **Dark (Test Card)**, the look so far and still
+  the default, **Light**, a light version with the same colour bars, yellow TV badge and bright show
+  badges, or **Follow Windows** (light or dark as Windows' app mode is set). Every window and message
+  follows it. The look is chosen when TV Toolkit starts, so a change shows the next time it starts.
+- **Help.** A new **Help** page in the side bar (or F1): getting started, the library, keeping up,
+  tidying up, everything else and the keys.
+
+### Changed
+- The show badges (NEW, CHECK MATCH, ENDED...) and message-box badges keep their bright Test Card
+  colours in both looks.
+
 ## [1.02] - 2026-11-19
 ### Changed
 - **Messages and questions in TV Toolkit's own look.** Every message and Yes/No question now opens
