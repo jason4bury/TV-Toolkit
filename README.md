@@ -6,7 +6,7 @@
 
 A Windows app for keeping an eye on the TV programmes on your NAS or media drive: what's new, what's airing, what's missing and what looks wrong on disk.
 
-![Version](https://img.shields.io/badge/version-v1.01-blue) ![Platform](https://img.shields.io/badge/platform-Windows-0078D6) ![PowerShell](https://img.shields.io/badge/PowerShell-5.1-5391FE) ![Licence](https://img.shields.io/badge/licence-MIT-green) ![Last commit](https://img.shields.io/github/last-commit/jason4bury/TV-Toolkit)
+![Version](https://img.shields.io/badge/version-v1.02-blue) ![Platform](https://img.shields.io/badge/platform-Windows-0078D6) ![PowerShell](https://img.shields.io/badge/PowerShell-5.1-5391FE) ![Licence](https://img.shields.io/badge/licence-MIT-green) ![Last commit](https://img.shields.io/github/last-commit/jason4bury/TV-Toolkit)
 
 ## ✨ Features
 
@@ -45,7 +45,7 @@ TV Toolkit reads your TV folders, matches each show with [TVmaze](https://www.tv
 
 ## 📦 Installation
 
-1. Download `TV-Toolkit-v1.01.zip` from the [latest release](../../releases/latest) and unzip it wherever you like to keep it.
+1. Download `TV-Toolkit-v1.02.zip` from the [latest release](../../releases/latest) and unzip it wherever you like to keep it.
 2. Double-click **TV Toolkit.cmd** in the unzipped folder. It makes a **TV Toolkit** shortcut there and in the Start menu, and starts TV Toolkit. From then on, use the shortcut, the Start menu or a pinned taskbar button.
 
 Nothing is installed and no Windows settings are changed. The shortcut runs the script with PowerShell's execution policy bypassed for that run only.

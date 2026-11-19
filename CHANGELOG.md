@@ -6,6 +6,23 @@ All notable changes to TV Toolkit are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.02] - 2026-11-19
+### Changed
+- **Messages and questions in TV Toolkit's own look.** Every message and Yes/No question now opens
+  in a TV Toolkit window (dark background, the test-card colour bars, a coloured badge for
+  information, warnings and questions, and the cyan main button) instead of Windows' plain grey
+  message box. One helper, `Show-TVMessage`, sits behind `Show-Msg` and `Confirm-Action`, so all
+  of the app's boxes change at once. Boxes open over whichever TV Toolkit window is in front, and
+  their text can be selected and copied.
+- Questions before something changes on disk or in your settings have plainly named buttons:
+  **Rename**, **Move them**, **Remove folders**, **Undo renames**, **Restore**, **Import**,
+  **Delete cache**, **Refresh all** and **Rescan now**, each with **Cancel** (or **Later**). The main
+  button is the one Enter presses; the safe one has the focus, and Esc or the X cancels.
+- The couldn't-start box, the crash box and the Windows Open/Save pickers are unchanged.
+
+### Fixed
+- Export settings said "Saved." without saying where; it now shows the file it saved.
+
 ## [1.01] - 2026-11-16
 ### Changed
 - **No exe any more.** Antivirus programs (ESET among them) kept flagging the PS2EXE exe as a

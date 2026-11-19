@@ -21,7 +21,7 @@
     Show data: TVmaze (https://www.tvmaze.com), CC BY-SA 4.0
 #>
 $AppName    = 'TV Toolkit'
-$AppVersion = '1.01'
+$AppVersion = '1.02'
 $Copyright  = 'Copyright (c) 2026 Jason Rhodes'
 $AppId      = 'jason4bury.TV-Toolkit'   # taskbar ID; the shortcut made by New-TVToolkitShortcut.ps1 uses the same one
 
@@ -2433,11 +2433,95 @@ try {
 $ui = $main.UI
 
 # ---------- helpers ----------
-function Show-Msg([string]$Text, [string]$Title = 'TV Toolkit', [string]$Icon = 'Information') {
-    [void][Windows.MessageBox]::Show($Win, $Text, $Title, 'OK', $Icon)
+# Message and question boxes in TV Toolkit's own "Test Card" look (they replace Windows' plain grey MessageBox).
+# $Kind: Information, Warning, Error or Question; it sets the badge colour and the heading.
+# $Buttons: the first is the main (cyan) button and is pressed by Enter; the last is pressed by Esc or the window's X.
+# Returns the text of the button pressed.
+$script:MsgKinds = @{
+    Information = @{ Glyph = 'i';               Color = '#35C2D6'; Heading = 'Good to know' }
+    Warning     = @{ Glyph = '!';               Color = '#F0A04B'; Heading = 'Heads up' }
+    Error       = @{ Glyph = [string][char]0xD7; Color = '#E5566B'; Heading = 'Something went wrong' }
+    Question    = @{ Glyph = '?';               Color = '#F4C542'; Heading = 'Just checking' }
 }
-function Confirm-Action([string]$Text, [string]$Title = 'TV Toolkit') {
-    return ([Windows.MessageBox]::Show($Win, $Text, $Title, 'YesNo', 'Question') -eq 'Yes')
+$MsgXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="TV Toolkit" Width="460" SizeToContent="Height" WindowStartupLocation="CenterOwner" ResizeMode="NoResize" ShowInTaskbar="False"
+        Background="#101318" Foreground="#E9ECF2" FontFamily="Segoe UI" FontSize="13" UseLayoutRounding="True" TextOptions.TextFormattingMode="Display">
+    <Window.Resources>
+<!--THEME-->
+    </Window.Resources>
+    <DockPanel Background="#101318">
+        <UniformGrid DockPanel.Dock="Top" Rows="1" Height="4">
+            <Rectangle Fill="#C9CBCF"/><Rectangle Fill="#F4C542"/><Rectangle Fill="#35C2D6"/><Rectangle Fill="#5CC98A"/>
+            <Rectangle Fill="#C55BC9"/><Rectangle Fill="#E5566B"/><Rectangle Fill="#4A79E0"/>
+        </UniformGrid>
+        <Border DockPanel.Dock="Top" Background="#13171D" BorderBrush="{StaticResource Line}" BorderThickness="0,0,0,1" Padding="20,12">
+            <StackPanel Orientation="Horizontal">
+                <Border x:Name="mBadge" Width="28" Height="28" CornerRadius="14" VerticalAlignment="Center">
+                    <TextBlock x:Name="mGlyph" FontFamily="Bahnschrift SemiBold, Segoe UI" FontSize="16" Foreground="#101318" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </Border>
+                <TextBlock x:Name="mHeading" Style="{StaticResource H2}" Margin="12,0,0,0" VerticalAlignment="Center"/>
+            </StackPanel>
+        </Border>
+        <StackPanel Margin="20,16,20,18">
+            <ScrollViewer MaxHeight="420" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Focusable="False">
+                <TextBox x:Name="mText" Style="{StaticResource BareText}" IsReadOnly="True" IsTabStop="False" TextWrapping="Wrap" FontSize="13.5" VerticalContentAlignment="Top"/>
+            </ScrollViewer>
+            <StackPanel x:Name="mButtons" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0"/>
+        </StackPanel>
+    </DockPanel>
+</Window>
+'@
+function Show-TVMessage([string]$Text, [string]$Kind = 'Information', [string[]]$Buttons = @('OK'), [string]$Heading = '') {
+    if (-not $script:MsgKinds.ContainsKey($Kind)) { $Kind = 'Information' }
+    $k = $script:MsgKinds[$Kind]
+    if (-not $Heading) { $Heading = $k.Heading }
+    if (-not $Buttons -or $Buttons.Count -eq 0) { $Buttons = @('OK') }
+    $cancel = $Buttons[-1]
+    # sit on top of whichever TV Toolkit window is in front (the main window, or a dialog that's open)
+    $owner = $null
+    try {
+        if ($Win -and $Win.IsVisible) {
+            $owner = $Win
+            foreach ($o in $Win.OwnedWindows) { if ($o.IsVisible -and $o.IsActive) { $owner = $o } }
+        }
+    } catch { $owner = $null }
+    $d = New-Window $MsgXaml
+    $w = $d.Window; $u = $d.UI
+    # wide enough for the buttons in one row (about 7.5 px a letter plus padding), and wider for a long message
+    $need = 48; foreach ($bt in $Buttons) { $need += [int]($bt.Length * 7.5) + 38 }
+    $width = 460; if ($Text.Length -gt 380) { $width = 560 }; if ($need -gt $width) { $width = [math]::Min(720, $need) }
+    $w.Width = $width
+    try { if ($Win -and $Win.Icon) { $w.Icon = $Win.Icon } } catch { Write-Verbose $_.Exception.Message }
+    if ($owner) { try { $w.Owner = $owner } catch { $owner = $null } }
+    if (-not $owner) { $w.WindowStartupLocation = 'CenterScreen'; $w.Topmost = $true; $w.ShowInTaskbar = $true }
+    $u.mBadge.Background = (New-Object Windows.Media.BrushConverter).ConvertFromString($k.Color)
+    $u.mGlyph.Text = $k.Glyph
+    $u.mHeading.Text = $Heading
+    $u.mText.Text = $Text
+    # main button first, as in TV Toolkit's other windows ("Use this show", then Cancel)
+    for ($i = 0; $i -lt $Buttons.Count; $i++) {
+        $b = New-Object Windows.Controls.Button
+        $b.Content = $Buttons[$i]; $b.Tag = $Buttons[$i]
+        if ($i -eq 0) { $b.Style = $w.FindResource('AccentButton'); $b.IsDefault = $true }
+        if ($i -eq $Buttons.Count - 1) { $b.IsCancel = $true; $b.Margin = New-Object Windows.Thickness 0 }
+        $b.Add_Click({ param($s, $e) $bw = [Windows.Window]::GetWindow($s); $bw.Tag = [string]$s.Tag; $bw.Close() })
+        [void]$u.mButtons.Children.Add($b)
+    }
+    # focus the safe (last) button, so a stray Space doesn't confirm; Enter still presses the main one
+    $w.Add_ContentRendered({ param($s, $e) try { $bp = $s.FindName('mButtons'); [void]$bp.Children[$bp.Children.Count - 1].Focus() } catch { Write-Verbose $_.Exception.Message } })
+    [void]$w.ShowDialog()
+    if ($w.Tag) { return [string]$w.Tag }
+    return $cancel
+}
+# Tell something with an OK button, or ask Yes/No. $Title is kept for older calls; anything other than the app name becomes the heading.
+function Show-Msg([string]$Text, [string]$Title = 'TV Toolkit', [string]$Icon = 'Information') {
+    $h = ''; if ($Title -and $Title -ne $AppName) { $h = $Title }
+    [void](Show-TVMessage $Text $Icon @('OK') $h)
+}
+function Confirm-Action([string]$Text, [string]$Title = 'TV Toolkit', [string]$YesText = 'Yes', [string]$NoText = 'No') {
+    $h = ''; if ($Title -and $Title -ne $AppName) { $h = $Title }
+    return ((Show-TVMessage $Text 'Question' @($YesText, $NoText) $h) -eq $YesText)
 }
 function Set-Status([string]$t) { $ui.txtStatus.Text = $t }
 function Get-Bitmap([string]$Path, [int]$Width = 0) {
@@ -3368,7 +3452,7 @@ function Export-CalendarIcs {
     & $add 'END:VCALENDAR'
     try { [IO.File]::WriteAllText($dlg.FileName, $sb.ToString(), (New-Object Text.UTF8Encoding($false))) } catch { Show-Msg "Couldn't save the file:`n$($_.Exception.Message)" 'TV Toolkit' 'Warning'; return }
     Set-Status "Saved $($up.Count) episode(s) to $($dlg.FileName)"
-    if (Confirm-Action "Saved $($up.Count) upcoming episode(s) to:`n$($dlg.FileName)`n`nOpen it now? Outlook (or your calendar app) will offer to add them. Saving again later and re-importing updates the same entries rather than doubling them.") { try { Start-Process -FilePath $dlg.FileName } catch { Write-Verbose $_.Exception.Message } }
+    if (Confirm-Action "Saved $($up.Count) upcoming episode(s) to:`n$($dlg.FileName)`n`nOpen it now? Outlook (or your calendar app) will offer to add them. Saving again later and re-importing updates the same entries rather than doubling them." $AppName 'Open it' 'Not now') { try { Start-Process -FilePath $dlg.FileName } catch { Write-Verbose $_.Exception.Message } }
 }
 function Update-CalendarView {
     $today = (Get-Date).Date
@@ -3941,7 +4025,7 @@ $ui.btnMissGo.Add_Click({ $r = $ui.dgMissing.SelectedItem; if ($r) { $ui.tabMain
 $ui.dgMissing.Add_MouseDoubleClick({ $r = $ui.dgMissing.SelectedItem; if ($r) { $ui.tabMain.SelectedItem = $ui.tLibrary; Open-Show $r.Folder } })
 $ui.btnMissIgnore.Add_Click({
     $r = $ui.dgMissing.SelectedItem; if (-not $r) { return }
-    if (-not (Confirm-Action "Leave '$($r.Show)' out of missing-episode checks from now on?`n`n(You can undo this by removing it from IgnoreMissing in settings.json in the data folder.)")) { return }
+    if (-not (Confirm-Action "Leave '$($r.Show)' out of missing-episode checks from now on?`n`n(You can undo this by removing it from IgnoreMissing in settings.json in the data folder.)" $AppName 'Leave it out' 'Cancel')) { return }
     $TVT.Settings.IgnoreMissing = @($TVT.Settings.IgnoreMissing) + $r.Folder
     Save-Settings
     $script:MissingRows = @($script:MissingRows | Where-Object { $_.Folder -ne $r.Folder })
@@ -3965,7 +4049,7 @@ $ui.btnNamesApply.Add_Click({
     if (-not $rows) { Show-Msg 'Select rows that have a Rename to name first. (Rows without one need fixing by hand.)'; return }
     $preview = ($rows | Select-Object -First 8 | ForEach-Object { "$([IO.Path]::GetFileName($_.Current))`n   -> $($_.Proposed)" }) -join "`n"
     if ($rows.Count -gt 8) { $preview += "`n...and $($rows.Count - 8) more" }
-    if (-not (Confirm-Action "Rename $($rows.Count) file(s)? Subtitles and other files with the same name go with them.`n`n$preview")) { return }
+    if (-not (Confirm-Action "Rename $($rows.Count) file(s)? Subtitles and other files with the same name go with them.`n`n$preview" $AppName 'Rename' 'Cancel')) { return }
     $log = New-Object System.Collections.Generic.List[string]
     $fails = @()
     foreach ($r in $rows) {
@@ -3989,7 +4073,7 @@ $ui.btnNamesUndo.Add_Click({
     if (-not $logFile) { $logFile = Get-ChildItem -LiteralPath (Join-Path $DataDir 'Logs') -Filter 'renames-*.tsv' -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1 -ExpandProperty FullName }
     if (-not $logFile -or -not (Test-Path -LiteralPath $logFile)) { Show-Msg 'There is no rename batch to undo.'; return }
     $lines = @([IO.File]::ReadAllLines($logFile))
-    if (-not (Confirm-Action "Undo the rename batch from $([IO.Path]::GetFileNameWithoutExtension($logFile).Replace('renames-',''))? ($($lines.Count) file(s))")) { return }
+    if (-not (Confirm-Action "Undo the rename batch from $([IO.Path]::GetFileNameWithoutExtension($logFile).Replace('renames-',''))? ($($lines.Count) file(s))" $AppName 'Undo renames' 'Cancel')) { return }
     $fails = 0
     [array]::Reverse($lines)
     foreach ($l in $lines) { $p = $l.Split("`t"); try { if (Test-Path -LiteralPath $p[1]) { [IO.File]::Move($p[1], $p[0]) } } catch { $fails++ } }
@@ -4005,7 +4089,7 @@ $ui.btnDupesMove.Add_Click({
     $rows = @($ui.dgDupes.SelectedItems); if (-not $rows) { Show-Msg 'Select the copies you want to move out first.'; return }
     $hold = "$($TVT.Settings.HoldFolder)".Trim()
     if (-not $hold) { Show-Msg 'Set a holding folder in Settings first.'; return }
-    if (-not (Confirm-Action "Move $($rows.Count) file(s) into:`n$hold`n`nThey're moved, not deleted - you can delete them from there when you're sure.")) { return }
+    if (-not (Confirm-Action "Move $($rows.Count) file(s) into:`n$hold`n`nThey're moved, not deleted - you can delete them from there when you're sure." $AppName 'Move them' 'Cancel')) { return }
     $fails = @()
     foreach ($r in $rows) { try { Move-WithSidecars $r.Path (Join-Path $hold $r.Show) } catch { $fails += "$($r.File): $($_.Exception.Message)" } }
     if ($fails) { Show-Msg ("Some files couldn't be moved:`n" + ($fails -join "`n")) 'TV Toolkit' 'Warning' }
@@ -4023,7 +4107,7 @@ $ui.btnProbHold.Add_Click({
     if (-not $rows) { Show-Msg 'Select one or more files first (folders are handled by Remove empty folders).'; return }
     $hold = "$($TVT.Settings.HoldFolder)".Trim()
     if (-not $hold) { Show-Msg 'Set a holding folder in Settings first.'; return }
-    if (-not (Confirm-Action "Move $($rows.Count) file(s) into:`n$hold`n`nThey're moved, not deleted.")) { return }
+    if (-not (Confirm-Action "Move $($rows.Count) file(s) into:`n$hold`n`nThey're moved, not deleted." $AppName 'Move them' 'Cancel')) { return }
     $fails = @(); $done = 0
     foreach ($r in $rows) {
         if (-not (Test-Path -LiteralPath $r.Path)) { continue }
@@ -4036,7 +4120,7 @@ $ui.btnProbSeason.Add_Click({
     $rows = @($ui.dgProblems.SelectedItems | Where-Object { $_.Type -eq 'Not in a season folder' -and $_.Target })
     if (-not $rows) { Show-Msg "Select one or more 'Not in a season folder' rows that say which season they belong in."; return }
     $preview = ($rows | Select-Object -First 8 | ForEach-Object { "$([IO.Path]::GetFileName($_.Path))`n   -> $($_.Target)\" }) -join "`n"
-    if (-not (Confirm-Action "Move $($rows.Count) episode(s) into their season folders? Subtitles and other files with the same name go with them.`n`n$preview")) { return }
+    if (-not (Confirm-Action "Move $($rows.Count) episode(s) into their season folders? Subtitles and other files with the same name go with them.`n`n$preview" $AppName 'Move them' 'Cancel')) { return }
     $fails = @()
     foreach ($r in $rows) {
         $show = $script:Lib[$r.Folder]; if (-not $show) { continue }
@@ -4049,7 +4133,7 @@ $ui.btnProbEmpty.Add_Click({
     $rows = @($ui.dgProblems.SelectedItems | Where-Object { $_.Kind -eq 'dir' })
     if (-not $rows) { $rows = @($script:ProblemRows | Where-Object { $_.Kind -eq 'dir' }) }
     if (-not $rows) { Show-Msg 'There are no empty folders in the list.'; return }
-    if (-not (Confirm-Action "Remove $($rows.Count) empty folder(s)? Only folders that are still completely empty are removed.")) { return }
+    if (-not (Confirm-Action "Remove $($rows.Count) empty folder(s)? Only folders that are still completely empty are removed." $AppName 'Remove folders' 'Cancel')) { return }
     $n = 0
     foreach ($r in ($rows | Sort-Object { $_.Path.Length } -Descending)) {
         try { if ((Test-Path -LiteralPath $r.Path) -and @([IO.Directory]::GetFileSystemEntries($r.Path)).Count -eq 0) { [IO.Directory]::Delete($r.Path); $n++ } } catch { Write-Verbose $_.Exception.Message }
@@ -4099,7 +4183,7 @@ $ui.btnRestore.Add_Click({
     $dlg = New-Object Microsoft.Win32.OpenFileDialog
     $dlg.Filter = 'TV Toolkit backup (*.zip)|*.zip'; $dlg.InitialDirectory = (Join-Path $DataDir 'Backups')
     if (-not $dlg.ShowDialog($Win)) { return }
-    if (-not (Confirm-Action "Restore from $([IO.Path]::GetFileName($dlg.FileName))?`n`nYour current settings and matches will be replaced. A backup of them is made first.")) { return }
+    if (-not (Confirm-Action "Restore from $([IO.Path]::GetFileName($dlg.FileName))?`n`nYour current settings and matches will be replaced. A backup of them is made first." $AppName 'Restore' 'Cancel')) { return }
     try { New-Backup '-before-restore' | Out-Null; $n = Import-DataZip $dlg.FileName; Import-SavedData; Update-BackupInfo; Show-Msg "Restored $n file(s)." } catch { Show-Msg "Restore failed:`n$($_.Exception.Message)" 'TV Toolkit' 'Warning' }
 })
 $ui.btnExportSettings.Add_Click({
@@ -4110,14 +4194,14 @@ $ui.btnExportSettings.Add_Click({
         $z = New-Backup '-export'
         Copy-Item -LiteralPath $z -Destination $dlg.FileName -Force
         Remove-Item -LiteralPath $z -Force
-        Show-Msg "Saved. Copy it to the other PC and use Import settings there.`n`n"
+        Show-Msg "Saved to:`n$($dlg.FileName)`n`nCopy it to the other PC and use Import settings there."
     } catch { Show-Msg "Export failed:`n$($_.Exception.Message)" 'TV Toolkit' 'Warning' }
 })
 $ui.btnImportSettings.Add_Click({
     $dlg = New-Object Microsoft.Win32.OpenFileDialog
     $dlg.Filter = 'TV Toolkit settings (*.zip)|*.zip'
     if (-not $dlg.ShowDialog($Win)) { return }
-    if (-not (Confirm-Action "Import settings and matches from this file? What's here now is backed up first.")) { return }
+    if (-not (Confirm-Action "Import settings and matches from this file? What's here now is backed up first." $AppName 'Import' 'Cancel')) { return }
     try { New-Backup '-before-import' | Out-Null; Import-DataZip $dlg.FileName | Out-Null; Import-SavedData; Show-Msg 'Imported. Rescanning the library now.'; Start-Scan } catch { Show-Msg "Import failed:`n$($_.Exception.Message)" 'TV Toolkit' 'Warning' }
 })
 $ui.btnPrintList.Add_Click({
@@ -4130,9 +4214,9 @@ $ui.btnPrintList.Add_Click({
 $ui.btnOpenData.Add_Click({ Open-InExplorer $DataDir })
 $ui.btnRematchAll.Add_Click({ Start-MatchJob })
 $ui.btnReadMedia.Add_Click({ Start-MediaProbe -All; Set-Status 'Reading video details from every episode file...' })
-$ui.btnRefreshAll.Add_Click({ if (Confirm-Action 'Fetch fresh info for every matched show from TVmaze? This takes a minute or two.') { Start-MatchJob -RefreshAll } })
+$ui.btnRefreshAll.Add_Click({ if (Confirm-Action 'Fetch fresh info for every matched show from TVmaze? This takes a minute or two.' $AppName 'Refresh all' 'Cancel') { Start-MatchJob -RefreshAll } })
 $ui.btnClearImages.Add_Click({
-    if (-not (Confirm-Action 'Delete the cached posters and cast photos? They download again as needed.')) { return }
+    if (-not (Confirm-Action 'Delete the cached posters and cast photos? They download again as needed.' $AppName 'Delete cache' 'Cancel')) { return }
     Get-ChildItem -LiteralPath (Join-Path $DataDir 'Cache\posters') -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
     Get-ChildItem -LiteralPath (Join-Path $DataDir 'Cache\people') -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
     Get-ChildItem -LiteralPath (Join-Path $DataDir 'Cache\people-large') -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
@@ -4167,7 +4251,7 @@ $ui.btnSaveSettings.Add_Click({
     $ui.txtSettingsSaved.Text = "Saved at $(Get-Date -Format 'HH:mm')"
     Update-LibraryView
     Update-NewTabHeader
-    if ($rootsChanged -and (Confirm-Action 'Your TV folders changed. Rescan now?')) { Start-Scan }
+    if ($rootsChanged -and (Confirm-Action 'Your TV folders changed. Rescan now?' $AppName 'Rescan now' 'Later')) { Start-Scan }
 })
 $ui.btnTestMaze.Add_Click({
     Read-SettingsForm | Out-Null
@@ -4211,6 +4295,11 @@ $ui.txtAboutVersion.Text = "v$AppVersion  $DOT  $Copyright  $DOT  MIT licence  $
 $ui.txtHeaderVersion.Text = "v$AppVersion"
 $Win.Title = "$AppName v$AppVersion"
 $ui.txtAboutNew.Text = @"
+1.02
+$DOT  Messages and questions now come up in TV Toolkit's own look (dark window, test-card colour bars, coloured badge, cyan main button) instead of Windows' plain grey box. They sit over whichever TV Toolkit window is open, and you can select and copy their text.
+$DOT  Questions before renaming, moving, removing, restoring or importing have plainly named buttons, such as Rename or Move them, and Cancel.
+$DOT  Export settings says where it saved the file.
+
 1.01
 $DOT  No exe any more: antivirus programs kept flagging it by mistake. TV Toolkit.cmd in the release makes a TV Toolkit shortcut (there and in the Start menu) that starts it without a console window. Settings and data are unchanged.
 $DOT  The taskbar button shows TV Toolkit's own icon, and pinning it pins TV Toolkit.
